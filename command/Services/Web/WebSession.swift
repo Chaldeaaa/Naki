@@ -293,7 +293,8 @@ final class WebSession {
             }
         }
         let context: [String: Any] = [
-            "hand": show ? store.tehaiTiles : [],
+            // The drawn tile is stored separately from tehai, but is also visible on the board.
+            "hand": show ? store.tehaiTiles + [store.tsumoTile].compactMap { $0 } : [],
             "callTiles": callTiles,
             "isCallOpportunity": current && snapshot?.isCallOpportunity == true
         ]
