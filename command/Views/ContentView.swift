@@ -1945,12 +1945,16 @@ struct PluginsPageView: View {
         Text("會刪掉 \(id) 的整個插件目錄。可重新匯入或放檔案救回。")
     }
 
-    /// 分頁主體：插件 tab 走 master-detail（雙欄），Log/信任走捲動。
+    /// 分頁主體：macOS 用雙欄管理；iOS 改成單欄，避免橫向 iPhone 把 split view 收成空白。
     @ViewBuilder
     private var tabBody: some View {
         switch tab {
         case .plugins:
+#if os(macOS)
             pluginsSplitView
+#else
+            iOSPluginsView
+#endif
         case .log:
             ScrollView { logSection.padding() }
         case .trust:
@@ -2017,6 +2021,56 @@ struct PluginsPageView: View {
         }
         .navigationSplitViewStyle(.balanced)
     }
+
+#if os(iOS)
+    /// iPhone 上直接把匯入、已安裝插件與插件詳情放在同一個捲動頁面。
+    /// 功能與 macOS 的 master-detail 相同，但不依賴 NavigationSplitView 的欄位顯示狀態。
+    private var iOSPluginsView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                importSection
+
+                if naki.pluginDescriptors.isEmpty {
+                    Text("還沒有插件。可以在上方貼 GitHub repo、gist 或 plugin.json 網址引入。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    GroupBox {
+                        VStack(spacing: 0) {
+                            ForEach(naki.pluginDescriptors, id: \.id) { d in
+                                DisclosureGroup(isExpanded: Binding(
+                                    get: { selectedPluginId == d.id },
+                                    set: { isExpanded in
+                                        if isExpanded {
+                                            selectedPluginId = d.id
+                                        } else if selectedPluginId == d.id {
+                                            selectedPluginId = nil
+                                        }
+                                    }
+                                )) {
+                                    pluginDetail(d)
+                                        .padding(.top, 12)
+                                } label: {
+                                    sidebarRow(d)
+                                }
+                                .padding(.vertical, 8)
+
+                                if d.id != naki.pluginDescriptors.last?.id {
+                                    Divider()
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("已安裝（\(naki.pluginDescriptors.count)）",
+                              systemImage: "puzzlepiece.extension")
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+#endif
 
     private func statusColor(_ d: PluginDescriptor) -> Color {
         if !d.isValid { return .red }
