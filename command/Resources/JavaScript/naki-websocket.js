@@ -438,9 +438,17 @@
         }
     }
 
+    const messageTypes = {
+        receive: { ArrayBuffer: 0, TypedArray: 0, Blob: 0, String: 0, Other: 0 },
+        send: { ArrayBuffer: 0, TypedArray: 0, Blob: 0, String: 0, Other: 0 }
+    };
     function handleMessage(ws, wsId, data, direction, isMajsoul) {
         // 只處理雀魂連接的訊息
         if (!isMajsoul) return;
+        const dataType = data instanceof ArrayBuffer ? 'ArrayBuffer'
+            : ArrayBuffer.isView(data) ? 'TypedArray'
+            : data instanceof Blob ? 'Blob' : typeof data === 'string' ? 'String' : 'Other';
+        messageTypes[direction][dataType]++;
 
         // 記錄選線要用的資訊。
         //
@@ -527,6 +535,7 @@
     // ========================================
 
     window.__nakiWebSocket = {
+        diagnostics: function () { return JSON.parse(JSON.stringify(messageTypes)); },
         // 獲取連接信息
         getConnections: function() {
             const result = [];
