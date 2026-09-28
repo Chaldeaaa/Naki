@@ -259,16 +259,21 @@ final class WebSession {
     ///
     /// `GameHighlightScript.make` 保留為 highlight payload 的參考實作與測試對象，
     /// 不再自動注入。關閉顯示（`.off`）時清一次並清空推薦——使用者關掉的東西不該還在畫面上。
-    func syncHighlight() {
+    func syncHighlight() async {
         guard backend.isReady else { return }
 
         let show = store.autoPlayMode.showRecommendation
         let recos = show ? store.recommendations : []
-        let recoScript = "window.__nakiRecommendations = "
-            + Self.recommendationsJSON(recos) + ";"
+        let json = Self.recommendationsJSON(recos)
+        let recoScript = """
+        window.__nakiRecommendations = (json);
+        if (window.__nakiPlugins && window.__nakiPlugins.recommendationsChanged) {
+          window.__nakiPlugins.recommendationsChanged(window.__nakiRecommendations);
+        }
+        """
         let tail = show ? "" : "\n" + GameHighlightScript.clear
 
-        Task { _ = try? await backend.callJavaScript(recoScript + tail) }
+        _ = try? await backend.callJavaScript(recoScript + tail)
     }
 
     /// 把推薦序列化成插件好用的 JSON（唯讀快照）。純函式，可測。
