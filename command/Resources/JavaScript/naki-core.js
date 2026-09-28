@@ -253,6 +253,17 @@
         /// 由圖集 UV 反推這是哪一張牌（MJAI 記法）
         function tileFromST(st) {
             if (!st || st.length < 4) return null;
+
+            // 雀魂牌面圖集是 10 × 4：_MainTex_ST 的 scale 應接近 0.1 × 0.25。
+            // 只看 offset 會把一般全螢幕 quad（常見 [1,1,0,0]）誤認成字牌，
+            // 然後把整個畫面當成那張牌一起染色。
+            var sx = Number(st[0]), sy = Number(st[1]);
+            if (!Number.isFinite(sx) || !Number.isFinite(sy)
+                || Math.abs(sx - 0.1) > 0.015
+                || Math.abs(sy - 0.25) > 0.015) {
+                return null;
+            }
+
             var u = Math.round(st[2] * 10) / 10;
             var v = Math.round(st[3] * 100) / 100;
             var suit = SUIT_BY_V[String(v)];
@@ -452,7 +463,7 @@
                     }
 
                     // 一、手牌：用 UV 認出是哪張牌
-                    if (L.st && count === 6 && targetCount) {
+                    if (L.st && !L.ui && count === 6 && targetCount) {
                         try {
                             var tile = tileFromST(gl.getUniform(prog, L.st));
                             if (tile && targets[tile]) color = targets[tile];
