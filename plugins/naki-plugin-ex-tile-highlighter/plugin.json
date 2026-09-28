@@ -3,18 +3,32 @@
   "apiVersion": 1,
   "id": "naki-plugin-ex-tile-highlighter",
   "name": "牌面變色（naki-plugin-ex）",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "entry": "plugin.js",
-  "capabilities": ["observe"],
-  "methods": [".lq.ActionPrototype"],
+  "capabilities": [
+    "observe"
+  ],
+  "methods": [
+    ".lq.ActionPrototype"
+  ],
   "priority": 100,
   "license": "CC0-1.0",
   "settings": {
     "color": {
       "type": "string",
       "default": "green",
-      "description": "高亮顏色 green/red/blue"
+      "description": "推薦牌顏色 green/red/blue"
+    },
+    "dimOthers": {
+      "type": "boolean",
+      "default": true,
+      "description": "淡化其餘手牌（需要新版 Naki）"
+    },
+    "experimentalPopup": {
+      "type": "boolean",
+      "default": false,
+      "description": "實驗性副露面板染色（尚未完成 iOS 實機驗證，可能誤染）"
     }
   },
-  "description": "推薦更新後立即高亮機率最高的打牌；舊版 Naki 退回 ActionPrototype 觸發。"
+  "description": "推薦更新即時染色；最佳棄牌/立直高亮、其餘手牌淡化、副露組合橙色。關閉時清除。舊版 Naki 僅支援封包觸發的有限相容模式。"
 }
