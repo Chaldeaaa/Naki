@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "naki-plugin-ex-tile-highlighter",
+  "name": "牌面變色（naki-plugin-ex）",
+  "version": "1.1.0",
+  "entry": "plugin.js",
+  "capabilities": ["observe"],
+  "methods": [".lq.ActionPrototype"],
+  "priority": 100,
+  "license": "CC0-1.0",
+  "settings": {
+    "color": {
+      "type": "string",
+      "default": "green",
+      "description": "高亮顏色 green/red/blue"
+    }
+  },
+  "description": "推薦更新後立即高亮機率最高的打牌；舊版 Naki 退回 ActionPrototype 觸發。"
+}
