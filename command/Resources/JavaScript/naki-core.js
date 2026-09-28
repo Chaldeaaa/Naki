@@ -145,6 +145,8 @@
         var objIds = new WeakMap();
         var nextObjId = 1;
         var tintedCount = 0;
+        var tileCandidates = 0, rejectedTiles = 0;
+        var uvSamples = [];
 
         // ── 由 hook 追蹤的 GL 狀態 ───────────────────────────────────────
         //
@@ -253,7 +255,20 @@
         /// 由圖集 UV 反推這是哪一張牌（MJAI 記法）
         function tileFromST(st) {
             if (!st || st.length < 4) return null;
+
+            // 雀魂牌面圖集是 10 × 4：_MainTex_ST 的 scale 應接近 0.1 × 0.25。
+            // 只看 offset 會把一般全螢幕 quad（常見 [1,1,0,0]）誤認成字牌，
+            // 然後把整個畫面當成那張牌一起染色。
+            var sx = Number(st[0]), sy = Number(st[1]);
+            if (!Number.isFinite(sx) || !Number.isFinite(sy)
+                || Math.abs(sx - 0.1) > 0.015
+                || Math.abs(sy - 0.25) > 0.015) {
+                return null;
+            }
+
+            if (!Number.isFinite(st[2]) || !Number.isFinite(st[3])) return null;
             var u = Math.round(st[2] * 10) / 10;
+            if (Math.abs(st[2] - u) > 0.015) return null;
             var v = Math.round(st[3] * 100) / 100;
             var suit = SUIT_BY_V[String(v)];
             if (suit) {
@@ -343,6 +358,11 @@
                     calib.step = 1;
                     return;
                 }
+                // Rotation/resizing invalidates the reference image on iOS.
+                if (calib.base.w !== f.w || calib.base.h !== f.h) {
+                    calib = null; nameProbe = -1; calibCooldown = CAL_RETRY_FRAMES;
+                    return;
+                }
                 var ord = calib.step - 1;
                 var d = frameDelta(calib.base, f);
                 // 名字的幾何特徵：四家分坐四方 ⇒ 變動像素**散在至少 3 個象限**，
@@ -352,7 +372,7 @@
                 var ok = d.n > 8 && spread > 0.4 && d.quads >= 3;
                 calib.results.push({ ord: ord, n: d.n, spread: spread, quads: d.quads,
                                      score: ok ? spread / d.n : 0 });
-                if (calib.step > calib.total) {
+                if (calib.step >= calib.total) {
                     var best = null;
                     calib.results.forEach(function (r) {
                         if (r.score > 0 && (!best || r.score > best.score)) best = r;
@@ -452,9 +472,16 @@
                     }
 
                     // 一、手牌：用 UV 認出是哪張牌
-                    if (L.st && count === 6 && targetCount) {
+                    if (L.st && !L.ui && count === 6 && targetCount) {
                         try {
-                            var tile = tileFromST(gl.getUniform(prog, L.st));
+                            var st = gl.getUniform(prog, L.st);
+                            tileCandidates++;
+                            var tile = tileFromST(st);
+                            if (!tile) rejectedTiles++;
+                            if (st && uvSamples.length < 8) {
+                                var sample = Array.prototype.slice.call(st);
+                                if (!uvSamples.some(function (x) { return String(x) === String(sample); })) uvSamples.push(sample);
+                            }
                             if (tile && targets[tile]) color = targets[tile];
                         } catch (e) { /* 取不到就當作不是牌 */ }
                     }
@@ -490,12 +517,13 @@
                     var baseAlpha = (prev && prev.length > 3) ? prev[3] : 1;
                     var alpha = (color.length > 3) ? color[3] * baseAlpha : baseAlpha;
                     gl.uniform4f(L.color, color[0], color[1], color[2], alpha);
-                    var r = origDraw(mode, count, type, offset);
-                    if (prev && prev.length > 3) {
-                        gl.uniform4f(L.color, prev[0], prev[1], prev[2], prev[3]);
+                    try {
+                        var r = origDraw(mode, count, type, offset);
+                        tintedCount++;
+                        return r;
+                    } finally {
+                        if (prev && prev.length > 3) gl.uniform4f(L.color, prev[0], prev[1], prev[2], prev[3]);
                     }
-                    tintedCount++;
-                    return r;
                 };
             });
 
@@ -569,7 +597,7 @@
 
         function context() {
             var c = document.getElementById('unity-canvas');
-            return c ? c.getContext('webgl2') : null;
+            return c ? (c.getContext('webgl2') || c.getContext('webgl')) : null;
         }
 
         window.__nakiHighlight = {
@@ -599,6 +627,7 @@
                 return { targets: targets, popup: popupColor,
                          installed: installed,
                          tinted: tintedCount, totalFrames: totalFrames,
+                         tileCandidates: tileCandidates, rejectedTiles: rejectedTiles, uvSamples: uvSamples,
                          baselineSigs: baselineSigs.size,
                          baselineSigLimit: BASELINE_SIG_LIMIT,
                          baselineFrames: baselineFrames,
@@ -614,6 +643,10 @@
                 if (nameMaskOn) {
                     var g = context(); if (g) install(g);
                     calibCooldown = 0;
+                } else {
+                    // A running calibration must not keep hiding probe draws after disable.
+                    calib = null; nameProbe = -1; nameTargets.clear();
+                    calibResult = null; nameIdle = 0; nameHitThisFrame = false;
                 }
                 return { enabled: nameMaskOn, installed: installed,
                          calibrating: !!calib, targets: nameTargets.size };

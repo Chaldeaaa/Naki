@@ -1868,6 +1868,8 @@ struct PluginsPageView: View {
 
     // 移除插件的確認
     @State private var pendingRemoval: String?
+    @State private var diagnosticsText = "尚未檢查目前遊戲頁面"
+    @State private var checkingDiagnostics = false
     @State private var tab: PluginTab = .plugins
     @State private var selectedPluginId: String?   // master-detail 選中的插件
 
@@ -1956,7 +1958,9 @@ struct PluginsPageView: View {
             iOSPluginsView
 #endif
         case .log:
-            ScrollView { logSection.padding() }
+            ScrollView {
+                VStack(spacing: 12) { diagnosticsSection; logSection }.padding()
+            }
         case .trust:
             ScrollView { trustSection.padding() }
         }
@@ -2415,6 +2419,56 @@ struct PluginsPageView: View {
                 .frame(width: 160)
                 .font(.system(.caption, design: .monospaced))
                 .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        GroupBox("目前頁面診斷") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button("檢查 / 刷新狀態") {
+                    checkingDiagnostics = true
+                    Task { @MainActor in
+                        defer { checkingDiagnostics = false }
+                        do {
+                            let result = try await naki.actions.executeJavaScript("""
+                            return JSON.stringify(window.__nakiPlugins?.diagnostics?.()
+                              || {error: '插件診斷尚未載入，請確認 App 版本及遊戲頁面'}, null, 2);
+                            """)
+                            diagnosticsText = result as? String ?? "頁面沒有回傳診斷資料"
+                        } catch { diagnosticsText = error.localizedDescription }
+                    }
+                }
+                .disabled(checkingDiagnostics)
+                Button("重新注入已啟用插件並檢查") {
+                    checkingDiagnostics = true
+                    Task { @MainActor in
+                        defer { checkingDiagnostics = false }
+                        do {
+                            for descriptor in naki.pluginDescriptors where naki.settings.enabledPluginIds.contains(descriptor.id) && descriptor.isValid {
+                                let overrides = descriptor.manifest?.settings.map {
+                                    naki.settings.pluginSettingOverrides(pluginId: descriptor.id, keys: Array($0.keys))
+                                } ?? [:]
+                                if let script = PluginRegistry.enableScript(for: descriptor, overrides: overrides,
+                                        mayModifyOutbound: naki.settings.pluginsMayModifyOutbound) {
+                                    _ = try await naki.actions.executeJavaScript(script)
+                                }
+                            }
+                            let result = try await naki.actions.executeJavaScript("""
+                            return JSON.stringify(window.__nakiPlugins?.diagnostics?.()
+                              || {error: '插件診斷尚未載入，請確認 App 版本及遊戲頁面'}, null, 2);
+                            """)
+                            diagnosticsText = result as? String ?? "頁面沒有回傳診斷資料"
+                        } catch { diagnosticsText = error.localizedDescription }
+                    }
+                }
+                .disabled(checkingDiagnostics)
+                Text("設定中的啟用數：\(naki.settings.enabledPluginIds.count)。下方 registered 是目前頁面實際註冊結果。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(diagnosticsText)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
