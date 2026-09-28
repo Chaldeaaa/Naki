@@ -315,6 +315,7 @@ nonisolated enum PluginRegistry {
         return """
         window.__nakiPluginsMayModifyOutbound = \(mayModifyOutbound ? "true" : "false");
         if (window.__nakiPlugins && window.__nakiPlugins.setGrant) {
+          window.__nakiPlugins.disable(\(idLit));
           window.__nakiPlugins.setGrant(\(idLit), \(grantJSON));
           try {
         \(source)
