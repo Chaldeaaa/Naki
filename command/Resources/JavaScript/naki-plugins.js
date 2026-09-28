@@ -216,6 +216,7 @@
         // raw.bytes 是遊戲那份 buffer 的 view，set 就地改 ⇒ 遊戲與 Naki 都看到改後的。
         var caps = grant.capabilities || [];
         if (raw.direction === 'receive'
+            && raw.mutable !== false
             && caps.indexOf('rewriteReceive') !== -1
             && !isForbiddenMethod(method, grant)) {
             ctx.replace = function (newBytes) {

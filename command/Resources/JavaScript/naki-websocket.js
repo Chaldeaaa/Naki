@@ -423,14 +423,15 @@
     // ——這樣 Phase 2 的等長 rewriteReceive 就地改 bytes 後，Swift 收到的是改後的。
     // 插件層自己做解析、白名單、鏈式與錯誤隔離；這裡再包一層 try/catch，
     // 保證「插件出錯絕不影響封包本身」（fail-open）。
-    function dispatchToPlugins(direction, wsId, info, bytes) {
+    function dispatchToPlugins(direction, wsId, info, bytes, mutable) {
         if (!window.__nakiPlugins || typeof window.__nakiPlugins.dispatch !== 'function') return;
         try {
             window.__nakiPlugins.dispatch({
                 direction: direction,
                 wsId: wsId,
                 url: info ? info.url : '',
-                bytes: bytes
+                bytes: bytes,
+                mutable: mutable !== false
             });
         } catch (e) {
             console.error('[Naki WS] 插件 dispatch 錯誤:', e);
@@ -484,7 +485,18 @@
                     size: view.byteLength
                 });
             } else if (data instanceof Blob) {
-                // Blob：異步轉成 Base64
+                // WebKit 的 WebSocket.binaryType 預設可能是 Blob。Swift 原本能收到這條，
+                // 但插件只吃 ArrayBuffer / TypedArray，於是 iOS 會出現「插件已啟用卻沒事件」。
+                //
+                // Blob 只能異步展開；拿到的是副本，已經來不及改遊戲真正收到的 event.data，
+                // 所以這條只允許 observe，不提供 rewriteReceive。
+                data.arrayBuffer().then(function(buffer) {
+                    const view = new Uint8Array(buffer);
+                    dispatchToPlugins(direction, wsId, info, view, false);
+                }).catch(function(e) {
+                    console.error('[Naki WS] Blob 插件 dispatch 轉換失敗:', e);
+                });
+
                 blobToBase64(data, function(base64) {
                     sendToSwift('websocket_message', {
                         socketId: wsId,
