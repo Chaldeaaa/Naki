@@ -268,6 +268,17 @@
         return ctx;
     }
 
+    function makeRecommendationCtx(grant, recommendations) {
+        var ctx = {
+            recommendations: Array.isArray(recommendations) ? recommendations : [],
+            log: function (msg) { pluginLog(grant.__id, msg); }
+        };
+        if (grant.settings && typeof grant.settings === 'object') {
+            ctx.settings = grant.settings;
+        }
+        return ctx;
+    }
+
     // §8.2 預設禁改名單：這些 method 是 Naki 判斷牌局的真相來源，改了畫面看不出來、
     // 但會污染推薦與自動打牌。除非 manifest 明確在 rewriteAllow 逐一解除（§11 #5）。
     var FORBIDDEN_METHODS = [
@@ -304,6 +315,17 @@
             registry.set(spec.id, { spec: spec, grant: grant });
             failures.set(spec.id, 0);
             pluginLog(spec.id, 'registered（capabilities=' + (grant.capabilities || []).join(',') + '）');
+
+            // 高亮類插件不應該等下一個 WebSocket 封包才看見已經算好的推薦。
+            // 熱啟用時如果頁面上已經有推薦，立刻補一次目前狀態。
+            if (typeof spec.onRecommendations === 'function'
+                && Array.isArray(window.__nakiRecommendations)) {
+                try {
+                    spec.onRecommendations(makeRecommendationCtx(grant, window.__nakiRecommendations));
+                } catch (e) {
+                    noteFailure(spec.id, e);
+                }
+            }
             return true;
         },
 
@@ -369,6 +391,21 @@
                     noteFailure(entry.spec.id, e);
                 }
             }
+        },
+
+        // 推薦不是 WebSocket hook 的副產品：它要等 Swift / Mortal 推論完成才存在。
+        // 由 WebSession 在 __nakiRecommendations 更新後主動呼叫，讓插件拿到同一拍資料。
+        recommendationsChanged: function (recommendations) {
+            var recs = Array.isArray(recommendations) ? recommendations : [];
+            registry.forEach(function (entry, id) {
+                if (typeof entry.spec.onRecommendations !== 'function') return;
+                try {
+                    entry.spec.onRecommendations(makeRecommendationCtx(entry.grant, recs));
+                    failures.set(id, 0);
+                } catch (e) {
+                    noteFailure(id, e);
+                }
+            });
         },
 
         // 診斷用（唯讀）：目前註冊了哪些插件
