@@ -1,0 +1,85 @@
+name: Publish Naki-M iOS fork release
+on:
+  push:
+    branches: [release/ios-20260928]
+    paths: [.github/workflows/publish-ios-20260928.yml]
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: release-v2.11.0-ios.1
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TARGET_SHA: 434d70b9d3f542d6bed4bd1595088deb52ea9f45
+      BUILD_RUN: '36386713210'
+      RELEASE_TAG: v2.11.0-ios.1
+    steps:
+      - name: Verify source build
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN" > run.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open("run.json"))
+          assert run["conclusion"] == "success", "Source build did not succeed"
+          assert run["head_sha"] == os.environ["TARGET_SHA"], "Wrong source commit"
+          assert run["head_branch"] == "main", "Unexpected source branch"
+          PY
+      - name: Download and validate IPA
+        run: |
+          set -euo pipefail
+          gh run download "$BUILD_RUN" --repo "$GH_REPO" --name Naki-M-unsigned --dir dist
+          python3 - <<'PY'
+          import zipfile, plistlib
+          with zipfile.ZipFile("dist/Naki-M.ipa") as z:
+              assert z.testzip() is None, "Corrupt IPA"
+              infos = [n for n in z.namelist() if n.startswith("Payload/") and n.count("/") == 2 and n.endswith(".app/Info.plist")]
+              assert len(infos) == 1, "Expected exactly one app"
+              info = plistlib.loads(z.read(infos[0]))
+              executable = infos[0].rsplit("/", 1)[0] + "/" + info["CFBundleExecutable"]
+              assert z.getinfo(executable).file_size > 0, "Missing executable"
+              assert info["CFBundleIdentifier"] == "org.39c154f25912233am.Naki-M"
+              print("Validated:", info["CFBundleIdentifier"], info["CFBundleShortVersionString"])
+          PY
+          (cd dist && sha256sum Naki-M.ipa > SHA256SUMS.txt)
+      - name: Prepare release notes
+        run: |
+          cat > release-notes.md <<'NOTES'
+          ## Naki-M iOS 插件修复版
+          
+          基于上游 2.11.0 的个人 fork 构建，包含 iOS 插件系统和牌面染色修复。
+          
+          - 修复 WebKit Blob 消息未派发给插件的问题。
+          - 推荐完成后立即通知染色插件，改善推荐模式和自动模式的高亮时序。
+          - 排除非牌面 WebGL quad，减少整屏误染；增加插件诊断与重新注入。
+          - 修复插件设置热重载、停用清理及名字遮罩校准相关问题。
+          - 修复非摸切时，刚摸到的牌未加入淡化列表的问题（#5）。
+          
+          ### 安装
+          下载下方 **Naki-M.ipa**，使用 AltStore 等工具自行签名安装。这是 **unsigned IPA**，不是 App Store 签名包。无需下载 Source code。
+          
+          染色插件请使用 [Chaldeaaa/naki-plugins](https://github.com/Chaldeaaa/naki-plugins) 中的 tile-highlighter v1.2.0。本次摸牌淡化修复不需要再次更新插件。
+          
+          ### 验证
+          - GitHub Actions 已完成 Xcode archive 和 IPA 打包。
+          - 前一批改动通过 20 项 Node 回归；本次补丁复跑 19 项 Naki 集成回归通过。
+          - 前一版主要染色效果已有用户实机反馈；本次摸牌淡化补丁仍待实机复测。
+          - 副露面板染色为实验功能，默认关闭。
+          
+          构建提交：434d70b9d3f542d6bed4bd1595088deb52ea9f45
+          构建记录：https://github.com/Chaldeaaa/Naki/actions/runs/36386713210
+          App 内版本号仍为 2.11.0；发布标签用于区分此 fork 构建。
+          NOTES
+      - name: Publish verified assets
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" --repo "$GH_REPO" --target "$TARGET_SHA" \
+            --title "Naki-M v2.11.0-ios.1 — iOS 插件与染色修复" \
+            --notes-file release-notes.md --draft dist/Naki-M.ipa dist/SHA256SUMS.txt
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false --latest
