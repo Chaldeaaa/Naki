@@ -43,6 +43,13 @@
     // 連續失敗計數：id -> Number（達上限自動停用本頁面生命週期）
     var failures = new Map();
     var FAILURE_LIMIT = 10;
+    var diagnostics = { dispatches: 0, parsed: 0, hooks: 0, lastMethod: null,
+        recommendationUpdates: 0, recommendationHooks: 0, lastError: null };
+    function cleanup(entry) {
+        if (!entry || typeof entry.spec.onDisable !== 'function') return;
+        try { entry.spec.onDisable({ log: function (msg) { pluginLog(entry.spec.id, msg); } }); }
+        catch (e) { pluginLog(entry.spec.id, 'cleanup failed: ' + e.message); }
+    }
     // 自己維護的 msgId -> method（只為 RESPONSE 對回；與 nicknameMask 各一份，刻意隔離）
     var pendingMethods = new Map();
     var PENDING_LIMIT = 256;
@@ -95,11 +102,14 @@
 
     // 只在需要時報一次某插件的內部錯誤，避免對局時間軸被洗版
     function noteFailure(id, err) {
+        diagnostics.lastError = { id: id, message: String(err && err.message || err) };
         var n = (failures.get(id) || 0) + 1;
         failures.set(id, n);
         pluginLog(id, 'hook 拋錯（第 ' + n + ' 次）：' + (err && err.message ? err.message : err));
         if (n >= FAILURE_LIMIT) {
+            var entry = registry.get(id);
             registry.delete(id);
+            cleanup(entry);
             pluginLog(id, '連續失敗達 ' + FAILURE_LIMIT + ' 次，本頁面生命週期內停用');
         }
     }
@@ -268,9 +278,10 @@
         return ctx;
     }
 
-    function makeRecommendationCtx(grant, recommendations) {
+    function makeRecommendationCtx(grant, recommendations, context) {
         var ctx = {
-            recommendations: Array.isArray(recommendations) ? recommendations : [],
+            recommendations: JSON.parse(JSON.stringify(Array.isArray(recommendations) ? recommendations : [])),
+            context: JSON.parse(JSON.stringify(context || window.__nakiRecommendationContext || {})),
             log: function (msg) { pluginLog(grant.__id, msg); }
         };
         if (grant.settings && typeof grant.settings === 'object') {
@@ -332,14 +343,16 @@
         // naki-websocket.js 的 handleMessage 在中段呼叫。
         // raw = { direction:'send'|'receive', wsId:Number, url:String, bytes:Uint8Array }
         dispatch: function (raw) {
-            if (registry.size === 0) return;
+            diagnostics.dispatches++;
             if (!raw || !raw.bytes) return;
 
             var env = parseEnvelope(raw.bytes);
             if (!env) return;
 
+            diagnostics.parsed++;
             rememberIfRequest(env, raw.direction);
             var method = resolveMethod(env, raw.direction);
+            diagnostics.lastMethod = method;
             var isNaki = (env.msgId != null && env.msgId >= 60000);
 
             // §7.7b 回應路由：插件注入的 request（msgId 64000–65500）的 RESPONSE 回來時，
@@ -385,6 +398,7 @@
                 if (typeof fn !== 'function') continue;
                 var ctx = makeCtx(raw, env, method, isNaki, entry.grant);
                 try {
+                    diagnostics.hooks++;
                     fn(ctx);   // Phase 1 observe：回傳值忽略，ctx 無 replace/drop（改不到封包）
                     failures.set(entry.spec.id, 0);
                 } catch (e) {
@@ -395,17 +409,29 @@
 
         // 推薦不是 WebSocket hook 的副產品：它要等 Swift / Mortal 推論完成才存在。
         // 由 WebSession 在 __nakiRecommendations 更新後主動呼叫，讓插件拿到同一拍資料。
-        recommendationsChanged: function (recommendations) {
+        recommendationsChanged: function (recommendations, context) {
+            diagnostics.recommendationUpdates++;
             var recs = Array.isArray(recommendations) ? recommendations : [];
             registry.forEach(function (entry, id) {
                 if (typeof entry.spec.onRecommendations !== 'function') return;
                 try {
-                    entry.spec.onRecommendations(makeRecommendationCtx(entry.grant, recs));
+                    diagnostics.recommendationHooks++;
+                    entry.spec.onRecommendations(makeRecommendationCtx(entry.grant, recs, context));
                     failures.set(id, 0);
                 } catch (e) {
                     noteFailure(id, e);
                 }
             });
+        },
+
+        diagnostics: function () {
+            return JSON.parse(JSON.stringify({ runtime: diagnostics, registered: api.list(),
+                websocket: window.__nakiWebSocket && window.__nakiWebSocket.diagnostics
+                    ? window.__nakiWebSocket.diagnostics() : null,
+                recommendations: (window.__nakiRecommendations || []).length,
+                topRecommendation: (window.__nakiRecommendations || [])[0] || null,
+                highlight: window.__nakiHighlight && window.__nakiHighlight.state ? window.__nakiHighlight.state() : null,
+                nameMask: window.__nakiHighlight && window.__nakiHighlight.nameMaskStatus ? window.__nakiHighlight.nameMaskStatus() : null }));
         },
 
         // 診斷用（唯讀）：目前註冊了哪些插件
@@ -433,7 +459,9 @@
 
         // 熱停用：從 registry 移除、清 grant、歸零失敗計數。回可觀測結果。
         disable: function (id) {
+            var entry = registry.get(id);
             var wasRegistered = registry.delete(id);
+            cleanup(entry);
             failures.delete(id);
             if (window.__nakiPluginGrants) delete window.__nakiPluginGrants[id];
             pluginLog(id, 'disabled（熱停用，免 reload）');
