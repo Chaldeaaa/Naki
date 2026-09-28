@@ -292,10 +292,14 @@ final class NakiRuntime {
         // 模式一改就要立刻反映在畫面上，不能等下一次 Bot 回應：
         // 切到 `.off` 時把遊戲內標記清掉，切回 `.recommend` / `.auto` 時重新染上。
         store.updateHighlight(showRecommendation: effective.showRecommendation)
-        session.syncHighlight()
+        Task { [weak self] in
+            guard let self else { return }
+            await self.session.syncHighlight()
 
-        // 引擎自己會在下一輪讀新的模式；這裡只是叫它別等下一拍，並重設去抖。
-        autoPlayEngine?.modeDidChange()
+            // 切到自動時，先把當前推薦真正畫到頁面，再開始動作計時。
+            // 否則 0～1 秒的動作延遲可能先跑完，高亮看起來只在出牌前閃一下。
+            self.autoPlayEngine?.modeDidChange()
+        }
 
         // 離開全自動就取消待排的續局。不取消的話，使用者切回「推薦」之後，
         // 上一場結束時排的那個 45 秒等待仍會醒來，把帳號送進隊列。
@@ -470,13 +474,21 @@ extension NakiRuntime: BotResponseObserving {
     /// 檢查）與去抖，變成第二個不受控的觸發源。兩個觸發源（輪詢與這裡）
     /// 走的是同一輪 `AutoPlayEngine.runCycle()`。
     func botDidRespond() {
-        session.syncHighlight()
-        autoPlayEngine?.recommendationsDidChange()
+        Task { [weak self] in
+            guard let self else { return }
+
+            // 推薦寫進 WebView、插件完成同一拍高亮之後，才叫醒自動打牌。
+            // 這樣畫面提示的可見時間就是 action delay，而不是與它競速。
+            await self.session.syncHighlight()
+            self.autoPlayEngine?.recommendationsDidChange()
+        }
     }
 
     /// Bot 被刪除：推薦已清空 → 高亮會送出 `clear()`，標記不會留在畫面上。
     func botDidReset() {
-        session.syncHighlight()
+        Task { [weak self] in
+            await self?.session.syncHighlight()
+        }
     }
 
     /// 一局結束（`end_kyoku`）：讓引擎在自動模式下送 confirmNewRound 進下一局。
