@@ -580,6 +580,9 @@ struct ContentView: View {
         .sheet(isPresented: $showAdvancedSettings) {
             AdvancedSettingsSheet()
         }
+        .sheet(isPresented: $showPlugins) {
+            PluginsPageView()
+        }
     }
 
     /// 右側常駐欄：控制列在上、決策在中、狀態訊息釘在最下。
@@ -605,49 +608,59 @@ struct ContentView: View {
 
     /// 面板頂端的控制列——原本 nav bar 上那一整排。
     ///
-    /// 排成三列而不是硬擠一列：220pt 欄寬裡，延遲 stepper（~130pt）與五顆圖示
-    /// （~200pt）加起來超過可用寬度，擠在一起會先犧牲 stepper 的數字。
+    /// 圖示列維持原本的 40pt 按鈕寬度。加上插件入口後共六顆，超出側欄時可以左右滑動；
+    /// 原本五顆按鈕的位置和大小不變，插件入口放在最右邊。
     ///
     /// **順序：圖示列在最上，模式與延遲在下。** 圖示那排是「離開這裡去別的地方」
-    /// （重載／日誌／設定／收面板），一局裡按不到幾次；模式與延遲是對局中真的會動的
+    /// （重載／日誌／雲端／設定／收面板／插件），一局裡按不到幾次；模式與延遲是對局中真的會動的
     /// 東西，排在下面就離決策區更近。
     private var iOSPanelControls: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 0) {
-                Button(action: { naki.actions.reloadPage() }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-reload")
-                .accessibilityLabel("重新載入")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    Button(action: { naki.actions.reloadPage() }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-reload")
+                    .accessibilityLabel("重新載入")
 
-                Button(action: { showLog = true }) {
-                    Image(systemName: "terminal")
-                }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-log-toggle")
-                .accessibilityLabel("顯示日誌")
+                    Button(action: { showLog = true }) {
+                        Image(systemName: "terminal")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-log-toggle")
+                    .accessibilityLabel("顯示日誌")
 
-                cloudQuickToggle
-                    .frame(maxWidth: .infinity)
+                    cloudQuickToggle
+                        .frame(width: 40)
 
-                Button(action: { showAdvancedSettings = true }) {
-                    Image(systemName: "gearshape")
-                }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-settings")
-                .accessibilityLabel("進階設定")
+                    Button(action: { showAdvancedSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-settings")
+                    .accessibilityLabel("進階設定")
 
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showGamePanel = false }
-                } label: {
-                    Image(systemName: "sidebar.trailing")
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showGamePanel = false }
+                    } label: {
+                        Image(systemName: "sidebar.trailing")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-game-panel-toggle")
+                    .accessibilityLabel("隱藏決策面板")
+                    .accessibilityValue("已顯示")
+
+                    Button(action: { showPlugins = true }) {
+                        Image(systemName: "puzzlepiece.extension")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-plugins")
+                    .accessibilityLabel("插件")
                 }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-game-panel-toggle")
-                .accessibilityLabel("隱藏決策面板")
-                .accessibilityValue("已顯示")
             }
+            .scrollBounceBehavior(.basedOnSize)
 
             // 傳 nil：segmented control 自己撐滿欄寬，欄寬改了不必回頭同步點數。
             autoPlayModePicker(width: nil)
