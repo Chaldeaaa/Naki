@@ -344,7 +344,7 @@
         // raw = { direction:'send'|'receive', wsId:Number, url:String, bytes:Uint8Array }
         dispatch: function (raw) {
             diagnostics.dispatches++;
-            if (!raw || !raw.bytes) return;
+            if (registry.size === 0 || !raw || !raw.bytes) return;
 
             var env = parseEnvelope(raw.bytes);
             if (!env) return;

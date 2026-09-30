@@ -378,7 +378,7 @@ struct Recommendation: Identifiable, Equatable {
     }
 
     /// 顯示用的牌面字串
-    var displayTile: String {
+    nonisolated var displayTile: String {
         tile?.mjaiString ?? label
     }
 
