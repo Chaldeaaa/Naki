@@ -100,6 +100,8 @@ final class WebSession {
     private let store: GameStore
     private let settings: SettingsStore
     private let backend: any WebSessionBackend
+    private let controller = WKUserContentController()
+    private let websocketScript = WebSocketInterceptor.createUserScript()
 
     /// 頁面重新導覽時要重置的牌局側（由 `NakiRuntime` 注入 coordinator）
     weak var lifecycle: (any WebNavigationLifecycle)?
@@ -118,30 +120,11 @@ final class WebSession {
     // MARK: - 建立
 
     /// - Parameter messageHandler: JS bridge 的收件人（`NakiWebCoordinator.websocketHandler`）
-    init(store: GameStore, settings: SettingsStore, messageHandler: WKScriptMessageHandler,
-         pluginInjection: String? = nil) {
+    init(store: GameStore, settings: SettingsStore, messageHandler: WKScriptMessageHandler) {
         self.store = store
         self.settings = settings
 
-        let controller = WKUserContentController()
         controller.add(messageHandler, name: "websocketBridge")
-
-        // nil = 模組載入失敗且**沒有 fallback**：不注入任何東西。
-        // 半套的內嵌 fallback（沒有 sendRaw、socketId 起算不同）比沒有 fallback 危險，
-        // 見 `WebSocketInterceptor.createUserScript()`。
-        if let websocketScript = WebSocketInterceptor.createUserScript() {
-            controller.addUserScript(websocketScript)
-
-            // 第二個 WKUserScript：已啟用的第三方插件。**必須在 bundled 之後**——
-            // 插件要用 bundled 提供的 `window.__nakiPlugins`；同一 controller 內先加先執行。
-            // 只有 bundled 注入成功才加插件（bundled 都沒有，插件也無從掛起）。
-            if let pluginInjection, !pluginInjection.isEmpty {
-                controller.addUserScript(WKUserScript(
-                    source: pluginInjection,
-                    injectionTime: .atDocumentStart,
-                    forMainFrameOnly: false))
-            }
-        }
 
         // ⚠️ 全專案唯一的版本分歧點（回歸鎖：`PlatformDivergenceTests`）
         if #available(macOS 26.0, iOS 26.0, *) {
@@ -151,6 +134,7 @@ final class WebSession {
         }
 
         backend.sink = self
+        setPluginInjection(nil)
 
         // JS 注入失敗時不要顯示「準備就緒」——那正是舊 fallback 最危險的地方：
         // 看起來一切正常，實際上一個封包都收不到、一個動作都送不出去。
@@ -158,6 +142,21 @@ final class WebSession {
             store.statusMessage = "錯誤：JavaScript 注入失敗，Naki 無法讀牌局也無法送出動作（\(failure)）"
         } else {
             store.statusMessage = "準備就緒"
+        }
+    }
+
+    /// 重建 user scripts：bundled 在前、插件在後（同一 controller 內先加先執行）。
+    ///
+    /// 插件源碼／啟用清單／設定一變就要重建，否則頁面 reload 會退回啟動當下的插件。
+    /// `websocketScript` 為 nil＝模組載入失敗且**沒有 fallback**：什麼都不注入，
+    /// 插件也無從掛起（見 `WebSocketInterceptor.createUserScript()`）。
+    func setPluginInjection(_ source: String?) {
+        controller.removeAllUserScripts()
+        guard let websocketScript else { return }
+        controller.addUserScript(websocketScript)
+        if let source, !source.isEmpty {
+            controller.addUserScript(WKUserScript(
+                source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false))
         }
     }
 

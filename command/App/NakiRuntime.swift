@@ -84,30 +84,19 @@ final class NakiRuntime {
             settings?.cloudConfig
         }
 
-        // ①-c 插件：掃描目錄，產出已啟用插件的注入源碼（掃描只讀檔，不執行任何插件程式碼）。
-        //     預設 `enabledPluginIds` 空 ⇒ 沒有啟用插件 ⇒ injection 為 nil ⇒ 不加第二個 script。
-        let descriptors = PluginRegistry.scan()
-        pluginStore.descriptors = descriptors
-        let settingsStore = settings
-        let pluginInjection = PluginRegistry.buildInjectionScript(
-            descriptors: descriptors, enabled: settings.enabledPluginIds,
-            mayModifyOutbound: settings.pluginsMayModifyOutbound,
-            overridesFor: { id in
-                guard let schema = descriptors.first(where: { $0.id == id })?.manifest?.settings
-                else { return [:] }
-                return settingsStore.pluginSettingOverrides(pluginId: id, keys: Array(schema.keys))
-            })
-
         // ② 頁面側：JS bridge 的收件人就是 coordinator 的 WS handler
         session = WebSession(store: store,
                              settings: settings,
-                             messageHandler: coordinator.websocketHandler,
-                             pluginInjection: pluginInjection)
+                             messageHandler: coordinator.websocketHandler)
 
         // ③ 互相接線（兩邊都不認得對方的型別，只認得協定）
         coordinator.observer = self
         session.lifecycle = coordinator
         settings.adoptAutoPlaySupport(session.supportsAutoPlay)
+
+        // 插件：掃描只讀檔，不執行插件程式碼；沒有啟用插件＝只注入 bundled。
+        pluginStore.descriptors = PluginRegistry.scan()
+        session.setPluginInjection(pluginInjection())
 
         configureLiqiSender()
         adoptStoredAutoPlayMode()
@@ -400,6 +389,7 @@ final class NakiRuntime {
     func setPluginEnabled(id: String, enabled: Bool) {
         if enabled { settings.enabledPluginIds.insert(id) }
         else { settings.enabledPluginIds.remove(id) }
+        session.setPluginInjection(pluginInjection())
 
         let script: String?
         if enabled {
@@ -423,6 +413,7 @@ final class NakiRuntime {
     /// 呼叫端（UI）負責在開啟前做一次性確認對話。
     func setPluginsMayModifyOutbound(_ on: Bool) {
         settings.pluginsMayModifyOutbound = on
+        session.setPluginInjection(pluginInjection())
         let js = "window.__nakiPluginsMayModifyOutbound = \(on ? "true" : "false");"
         Task { [weak self] in
             _ = try? await self?.session.callJavaScript(js)
@@ -431,8 +422,24 @@ final class NakiRuntime {
 
     /// 重掃插件目錄，更新 `pluginDescriptors`。@Observable ⇒ UI 自動反映。
     /// URL 匯入落地後、或使用者手動放檔案後呼叫。
+    /// 已啟用的插件立即以新源碼熱重載，並更新下次頁面載入的注入。
     func rescanPlugins() {
         pluginStore.descriptors = PluginRegistry.scan()
+        for id in settings.enabledPluginIds { setPluginEnabled(id: id, enabled: true) }
+        session.setPluginInjection(pluginInjection())
+    }
+
+    /// 以目前的插件目錄、啟用清單與設定組出頁面載入時的插件注入源碼（無啟用插件＝nil）。
+    private func pluginInjection() -> String? {
+        let descriptors = pluginDescriptors
+        return PluginRegistry.buildInjectionScript(
+            descriptors: descriptors, enabled: settings.enabledPluginIds,
+            mayModifyOutbound: settings.pluginsMayModifyOutbound,
+            overridesFor: { [settings] id in
+                guard let schema = descriptors.first(where: { $0.id == id })?.manifest?.settings
+                else { return [:] }
+                return settings.pluginSettingOverrides(pluginId: id, keys: Array(schema.keys))
+            })
     }
 
     /// 移除插件：先熱停用（從頁面卸掉 + 清 enabledPluginIds），再刪目錄，再重掃。
