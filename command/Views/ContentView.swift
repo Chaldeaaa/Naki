@@ -580,6 +580,9 @@ struct ContentView: View {
         .sheet(isPresented: $showAdvancedSettings) {
             AdvancedSettingsSheet()
         }
+        .sheet(isPresented: $showPlugins) {
+            PluginsPageView()
+        }
     }
 
     /// 右側常駐欄：控制列在上、決策在中、狀態訊息釘在最下。
@@ -605,49 +608,59 @@ struct ContentView: View {
 
     /// 面板頂端的控制列——原本 nav bar 上那一整排。
     ///
-    /// 排成三列而不是硬擠一列：220pt 欄寬裡，延遲 stepper（~130pt）與五顆圖示
-    /// （~200pt）加起來超過可用寬度，擠在一起會先犧牲 stepper 的數字。
+    /// 圖示列維持原本的 40pt 按鈕寬度。加上插件入口後共六顆，超出側欄時可以左右滑動；
+    /// 原本五顆按鈕的位置和大小不變，插件入口放在最右邊。
     ///
     /// **順序：圖示列在最上，模式與延遲在下。** 圖示那排是「離開這裡去別的地方」
-    /// （重載／日誌／設定／收面板），一局裡按不到幾次；模式與延遲是對局中真的會動的
+    /// （重載／日誌／雲端／設定／收面板／插件），一局裡按不到幾次；模式與延遲是對局中真的會動的
     /// 東西，排在下面就離決策區更近。
     private var iOSPanelControls: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 0) {
-                Button(action: { naki.actions.reloadPage() }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-reload")
-                .accessibilityLabel("重新載入")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    Button(action: { naki.actions.reloadPage() }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-reload")
+                    .accessibilityLabel("重新載入")
 
-                Button(action: { showLog = true }) {
-                    Image(systemName: "terminal")
-                }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-log-toggle")
-                .accessibilityLabel("顯示日誌")
+                    Button(action: { showLog = true }) {
+                        Image(systemName: "terminal")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-log-toggle")
+                    .accessibilityLabel("顯示日誌")
 
-                cloudQuickToggle
-                    .frame(maxWidth: .infinity)
+                    cloudQuickToggle
+                        .frame(width: 40)
 
-                Button(action: { showAdvancedSettings = true }) {
-                    Image(systemName: "gearshape")
-                }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-settings")
-                .accessibilityLabel("進階設定")
+                    Button(action: { showAdvancedSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-settings")
+                    .accessibilityLabel("進階設定")
 
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { showGamePanel = false }
-                } label: {
-                    Image(systemName: "sidebar.trailing")
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { showGamePanel = false }
+                    } label: {
+                        Image(systemName: "sidebar.trailing")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-game-panel-toggle")
+                    .accessibilityLabel("隱藏決策面板")
+                    .accessibilityValue("已顯示")
+
+                    Button(action: { showPlugins = true }) {
+                        Image(systemName: "puzzlepiece.extension")
+                    }
+                    .frame(width: 40)
+                    .accessibilityIdentifier("toolbar-plugins")
+                    .accessibilityLabel("插件")
                 }
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("toolbar-game-panel-toggle")
-                .accessibilityLabel("隱藏決策面板")
-                .accessibilityValue("已顯示")
             }
+            .scrollBounceBehavior(.basedOnSize)
 
             // 傳 nil：segmented control 自己撐滿欄寬，欄寬改了不必回頭同步點數。
             autoPlayModePicker(width: nil)
@@ -1855,6 +1868,8 @@ struct PluginsPageView: View {
 
     // 移除插件的確認
     @State private var pendingRemoval: String?
+    @State private var diagnosticsText = "尚未檢查目前遊戲頁面"
+    @State private var checkingDiagnostics = false
     @State private var tab: PluginTab = .plugins
     @State private var selectedPluginId: String?   // master-detail 選中的插件
 
@@ -1932,14 +1947,20 @@ struct PluginsPageView: View {
         Text("會刪掉 \(id) 的整個插件目錄。可重新匯入或放檔案救回。")
     }
 
-    /// 分頁主體：插件 tab 走 master-detail（雙欄），Log/信任走捲動。
+    /// 分頁主體：macOS 用雙欄管理；iOS 改成單欄，避免橫向 iPhone 把 split view 收成空白。
     @ViewBuilder
     private var tabBody: some View {
         switch tab {
         case .plugins:
+#if os(macOS)
             pluginsSplitView
+#else
+            iOSPluginsView
+#endif
         case .log:
-            ScrollView { logSection.padding() }
+            ScrollView {
+                VStack(spacing: 12) { diagnosticsSection; logSection }.padding()
+            }
         case .trust:
             ScrollView { trustSection.padding() }
         }
@@ -2004,6 +2025,56 @@ struct PluginsPageView: View {
         }
         .navigationSplitViewStyle(.balanced)
     }
+
+#if os(iOS)
+    /// iPhone 上直接把匯入、已安裝插件與插件詳情放在同一個捲動頁面。
+    /// 功能與 macOS 的 master-detail 相同，但不依賴 NavigationSplitView 的欄位顯示狀態。
+    private var iOSPluginsView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                importSection
+
+                if naki.pluginDescriptors.isEmpty {
+                    Text("還沒有插件。可以在上方貼 GitHub repo、gist 或 plugin.json 網址引入。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    GroupBox {
+                        VStack(spacing: 0) {
+                            ForEach(naki.pluginDescriptors, id: \.id) { d in
+                                DisclosureGroup(isExpanded: Binding(
+                                    get: { selectedPluginId == d.id },
+                                    set: { isExpanded in
+                                        if isExpanded {
+                                            selectedPluginId = d.id
+                                        } else if selectedPluginId == d.id {
+                                            selectedPluginId = nil
+                                        }
+                                    }
+                                )) {
+                                    pluginDetail(d)
+                                        .padding(.top, 12)
+                                } label: {
+                                    sidebarRow(d)
+                                }
+                                .padding(.vertical, 8)
+
+                                if d.id != naki.pluginDescriptors.last?.id {
+                                    Divider()
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("已安裝（\(naki.pluginDescriptors.count)）",
+                              systemImage: "puzzlepiece.extension")
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+#endif
 
     private func statusColor(_ d: PluginDescriptor) -> Color {
         if !d.isValid { return .red }
@@ -2348,6 +2419,56 @@ struct PluginsPageView: View {
                 .frame(width: 160)
                 .font(.system(.caption, design: .monospaced))
                 .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        GroupBox("目前頁面診斷") {
+            VStack(alignment: .leading, spacing: 10) {
+                Button("檢查 / 刷新狀態") {
+                    checkingDiagnostics = true
+                    Task { @MainActor in
+                        defer { checkingDiagnostics = false }
+                        do {
+                            let result = try await naki.actions.executeJavaScript("""
+                            return JSON.stringify(window.__nakiPlugins?.diagnostics?.()
+                              || {error: '插件診斷尚未載入，請確認 App 版本及遊戲頁面'}, null, 2);
+                            """)
+                            diagnosticsText = result as? String ?? "頁面沒有回傳診斷資料"
+                        } catch { diagnosticsText = error.localizedDescription }
+                    }
+                }
+                .disabled(checkingDiagnostics)
+                Button("重新注入已啟用插件並檢查") {
+                    checkingDiagnostics = true
+                    Task { @MainActor in
+                        defer { checkingDiagnostics = false }
+                        do {
+                            for descriptor in naki.pluginDescriptors where naki.settings.enabledPluginIds.contains(descriptor.id) && descriptor.isValid {
+                                let overrides = descriptor.manifest?.settings.map {
+                                    naki.settings.pluginSettingOverrides(pluginId: descriptor.id, keys: Array($0.keys))
+                                } ?? [:]
+                                if let script = PluginRegistry.enableScript(for: descriptor, overrides: overrides,
+                                        mayModifyOutbound: naki.settings.pluginsMayModifyOutbound) {
+                                    _ = try await naki.actions.executeJavaScript(script)
+                                }
+                            }
+                            let result = try await naki.actions.executeJavaScript("""
+                            return JSON.stringify(window.__nakiPlugins?.diagnostics?.()
+                              || {error: '插件診斷尚未載入，請確認 App 版本及遊戲頁面'}, null, 2);
+                            """)
+                            diagnosticsText = result as? String ?? "頁面沒有回傳診斷資料"
+                        } catch { diagnosticsText = error.localizedDescription }
+                    }
+                }
+                .disabled(checkingDiagnostics)
+                Text("設定中的啟用數：\(naki.settings.enabledPluginIds.count)。下方 registered 是目前頁面實際註冊結果。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(diagnosticsText)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }

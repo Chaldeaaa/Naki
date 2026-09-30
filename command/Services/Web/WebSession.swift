@@ -259,16 +259,61 @@ final class WebSession {
     ///
     /// `GameHighlightScript.make` 保留為 highlight payload 的參考實作與測試對象，
     /// 不再自動注入。關閉顯示（`.off`）時清一次並清空推薦——使用者關掉的東西不該還在畫面上。
-    func syncHighlight() {
+    func syncHighlight() async {
         guard backend.isReady else { return }
 
         let show = store.autoPlayMode.showRecommendation
         let recos = show ? store.recommendations : []
-        let recoScript = "window.__nakiRecommendations = "
-            + Self.recommendationsJSON(recos) + ";"
+        let json = Self.recommendationsJSON(recos)
+        // Publish the hand and call combination from the same decision as the recommendations.
+        let snapshot = LiqiOperationStore.shared.latest
+        let current = snapshot?.sequence == store.recommendationsOplistSequence
+        var callTiles: [String] = []
+        if current, let top = recos.first {
+            let type: LiqiOperationType?
+            switch top.actionType {
+            case .chi: type = .chi
+            case .pon: type = .pon
+            case .kan: type = snapshot?.kanOperation
+            default: type = nil
+            }
+            if let type, let combinations = snapshot?.operation(of: type)?.combination {
+                let index: Int?
+                if type == .chi {
+                    let variant = top.label.hasPrefix("chi_") ? Int(top.label.dropFirst(4)) : 0
+                    index = variant.flatMap { snapshot?.chiCombinationIndex(variant: $0) }
+                } else {
+                    index = combinations.count == 1 ? 0 : nil
+                }
+                if let index, combinations.indices.contains(index) {
+                    callTiles = combinations[index].split(separator: "|").compactMap {
+                        LiqiTile.mjai(fromMajsoul: String($0))
+                    }
+                }
+            }
+        }
+        let context: [String: Any] = [
+            // The drawn tile is stored separately from tehai, but is also visible on the board.
+            "hand": show ? store.tehaiTiles + [store.tsumoTile].compactMap { $0 } : [],
+            "callTiles": callTiles,
+            "isCallOpportunity": current && snapshot?.isCallOpportunity == true
+        ]
+        let contextJSON = (try? JSONSerialization.data(withJSONObject: context))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let recoScript = """
+        window.__nakiRecommendations = \(json);
+        window.__nakiRecommendationContext = \(contextJSON);
+        if (window.__nakiPlugins && window.__nakiPlugins.recommendationsChanged) {
+          window.__nakiPlugins.recommendationsChanged(window.__nakiRecommendations, window.__nakiRecommendationContext);
+        }
+        """
         let tail = show ? "" : "\n" + GameHighlightScript.clear
 
-        Task { _ = try? await backend.callJavaScript(recoScript + tail) }
+        do {
+            _ = try await backend.callJavaScript(recoScript + tail)
+        } catch {
+            bridgeLog("[Plugin] Recommendation sync failed: \(error.localizedDescription)")
+        }
     }
 
     /// 把推薦序列化成插件好用的 JSON（唯讀快照）。純函式，可測。
@@ -278,7 +323,8 @@ final class WebSession {
             var d: [String: Any] = [
                 "label": r.label,
                 "probability": r.probability,
-                "actionType": r.actionType.rawValue
+                "actionType": r.actionType.rawValue,
+                "displayTile": r.displayTile
             ]
             d["tile"] = r.tile?.mjaiString as Any? ?? NSNull()
             if let detail = r.detail { d["detail"] = detail }
