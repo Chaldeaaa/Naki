@@ -203,4 +203,24 @@ final class ActionDelayModelTests: XCTestCase {
             XCTAssertGreaterThan(value, 0)
         }
     }
+
+    // MARK: - 伺服器時限
+
+    /// 時限已知（> 0）時延遲夾在「時限 − 安全餘裕」內，下限 0；0＝未知，只受 `maximum` 限制
+    func testDeadlineClampsDelay() {
+        func run(_ deadline: TimeInterval) -> [TimeInterval] {
+            var g = SeededGenerator(seed: 7)
+            return (0..<300).map { _ in
+                ActionDelayModel.delay(for: .riichi, scale: 10, deadline: deadline, using: &g)
+            }
+        }
+        let capped = run(5)
+        XCTAssertLessThanOrEqual(capped.max() ?? 99, 5 - ActionDelayModel.deadlineMargin + 1e-9)
+        XCTAssertEqual(capped.max() ?? 0, 5 - ActionDelayModel.deadlineMargin, accuracy: 1e-9,
+                       "scale=10 的抽樣會頂到上限，代表夾住的是這條")
+
+        XCTAssertEqual(run(1).max(), 0, "時限比餘裕還短時直接送出")
+        XCTAssertEqual(run(0).max() ?? 0, ActionDelayModel.maximum, accuracy: 1e-9)
+        XCTAssertEqual(run(300).max() ?? 0, ActionDelayModel.maximum, accuracy: 1e-9)
+    }
 }

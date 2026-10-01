@@ -245,19 +245,24 @@ final class AutoPlayDecisionResolverTests: XCTestCase {
                    "三麻不得自動送出，但仍應讓 UI 看得到推薦")
   }
 
-  /// 三麻連伺服器提供的和牌也不自動送——不自動送出**任何**動作
-  func testSanmaDoesNotAutoSendHora() {
-    let decision = AutoPlayDecisionResolver.resolve(
-      snapshot: snapshot(types: [.discard, .riichi, .tsumo]),
+  /// 和牌不需要模型：三麻（非雲端決策）伺服器授權的和牌照樣自動送；推薦模式仍只顯示
+  func testSanmaStillAutoSendsHora() {
+    let ops: [LiqiOperationType] = [.discard, .riichi, .tsumo]
+    let sent = AutoPlayDecisionResolver.resolve(
+      snapshot: snapshot(types: ops),
       recommendations: [rec(.discard, "9s")],
       mode: .auto,
       seat: 0,
       isSanma: true)
+    XCTAssertEqual(sent, .send(action: .hora, tile: "9s"))
 
-    if case .send = decision {
-      XCTFail("三麻不得自動送出和牌，實際: \(decision)")
-    }
-    XCTAssertEqual(decision, .surfaceOnly(action: .hora, tile: "9s"))
+    let surfaced = AutoPlayDecisionResolver.resolve(
+      snapshot: snapshot(types: ops),
+      recommendations: [rec(.discard, "9s")],
+      mode: .recommend,
+      seat: 0,
+      isSanma: true)
+    XCTAssertEqual(surfaced, .surfaceOnly(action: .hora, tile: "9s"))
   }
 
   /// 三麻的副露機會也不會自動送「過」
@@ -386,5 +391,73 @@ final class AutoPlayDecisionResolverTests: XCTestCase {
       isSanma: false)
 
     XCTAssertEqual(decision, .send(action: .discard, tile: "9s"))
+  }
+
+  // MARK: - 首選不在 oplist 時退次選（C3）
+
+  func testFallsBackToNextSupportedRecommendation() {
+    // 立直未授權（oplist 只有打牌）→ 退到同一批推論的打牌
+    let decision = AutoPlayDecisionResolver.resolve(
+      snapshot: snapshot(types: [.discard]),
+      recommendations: [rec(.riichi, "", 0.6), rec(.discard, "5p", 0.3)],
+      mode: .auto,
+      seat: 0,
+      recommendationsOplistSequence: 1)
+
+    XCTAssertEqual(decision, .send(action: .discard, tile: "5p"))
+  }
+
+  /// 退次選只退打牌或過；吃碰槓立直不可逆，且可能來自別的決策點
+  func testFallbackNeverLandsOnCallKanOrRiichi() {
+    for target in [LiqiOperationType.pon, .chi, .riichi] {
+      let decision = AutoPlayDecisionResolver.resolve(
+        snapshot: snapshot(types: [.discard, target]),
+        recommendations: [rec(.hora, "", 0.6), rec(.pon, "", 0.3), rec(.chi, "", 0.2),
+                          rec(.riichi, "", 0.1), rec(.kan, "", 0.1)],
+        mode: .auto,
+        seat: 0,
+        recommendationsOplistSequence: 1)
+      guard case .none = decision else {
+        return XCTFail("退選不得落在 \(target)，實際: \(decision)")
+      }
+    }
+
+    // 復驗的觸發例：推薦停在上一個副露視窗的 [none, pon, kan]，新的自家回合是 [discard, ankan]
+    let decision = AutoPlayDecisionResolver.resolve(
+      snapshot: snapshot(types: [.discard, .ankan]),
+      recommendations: [rec(.none, "", 0.6), rec(.pon, "", 0.3), rec(.kan, "", 0.1)],
+      mode: .auto,
+      seat: 0)
+    guard case .none = decision else {
+      return XCTFail("舊視窗的推薦不得變成暗槓，實際: \(decision)")
+    }
+  }
+
+  /// 推薦不是為這批 oplist 算的（序號不符或未知）就不退選
+  func testFallbackRequiresRecommendationsForThisOplist() {
+    for sequence in [nil, UInt64(0), UInt64(2)] {
+      let decision = AutoPlayDecisionResolver.resolve(
+        snapshot: snapshot(types: [.discard]),
+        recommendations: [rec(.riichi, "", 0.6), rec(.discard, "5p", 0.3)],
+        mode: .auto,
+        seat: 0,
+        recommendationsOplistSequence: sequence)
+      guard case .none = decision else {
+        return XCTFail("序號 \(String(describing: sequence)) 與當前 oplist 不符，不得退選，實際: \(decision)")
+      }
+    }
+  }
+
+  func testNoSupportedRecommendationSendsNothing() {
+    let decision = AutoPlayDecisionResolver.resolve(
+      snapshot: snapshot(types: [.pon]),
+      recommendations: [rec(.riichi, "", 0.6), rec(.kan, "", 0.3)],
+      mode: .auto,
+      seat: 0)
+
+    guard case .none(let reason) = decision else {
+      return XCTFail("都沒有授權時不得送出，實際: \(decision)")
+    }
+    XCTAssertTrue(reason.hasPrefix("action_riichi_not_in_oplist"), "reason 記首選: \(reason)")
   }
 }

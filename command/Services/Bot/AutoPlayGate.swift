@@ -63,6 +63,9 @@ enum AutoPlayGate {
         let now: Date
         /// 副露機會在多久之後才允許因「沒推薦」而送過
         let callPassGrace: TimeInterval
+        /// `recommendations` 是針對哪一批 oplist 算的（`Context.recommendationsOplistSequence`）。
+        /// 比當前 snapshot 舊＝明確過期；nil＝未知，不當成過期。
+        var recommendationsOplistSequence: UInt64?
     }
 
     static func evaluate(_ input: Input) -> Decision {
@@ -76,14 +79,27 @@ enum AutoPlayGate {
         // 而這條閘門下游的 `.sendPass` 會**繞過 resolver 直接送出**，
         // 所以擋必須擋在這裡，不能只擋在 resolver。
         // 例外：雲端 3p 決策放行（逐決策，見 `Input.cloudDecision`）。
-        guard !input.isSanma || input.cloudDecision else { return .skip(.sanmaUnsupported) }
+        //
+        // 和牌例外：能不能和的權威是伺服器 oplist，不需要模型，擋掉就是漏和（不可逆）。
+        // resolver 對和牌同樣不吃三麻降級，其餘三麻動作維持原限制。
+        if input.isSanma && !input.cloudDecision {
+            if !input.hasActionInFlight, input.snapshot?.horaOperation != nil { return .forceHora }
+            return .skip(.sanmaUnsupported)
+        }
 
         guard !input.hasActionInFlight else { return .skip(.actionInFlight) }
 
         // 合法性的權威在 oplist。沒有它就沒有伺服器授權，一律不動。
         guard let snapshot = input.snapshot else { return .skip(.noOplist) }
 
-        if input.recommendations.isEmpty {
+        // 推薦明確過期（是為更早的機會算的）的純副露機會，等同沒有推薦：
+        // 引擎對新視窗沒有產出（推論失敗、逾時）時，舊推薦會一直擋在 stale guard，
+        // 「過」永遠送不出去。有和牌的批次不在此列，維持走 resolver。
+        // 三麻非雲端決策不會走到這裡（上面已擋），其副露視窗交給伺服器逾時自動判過。
+        let staleCallOnly = snapshot.horaOperation == nil && snapshot.isCallOpportunity
+            && (input.recommendationsOplistSequence.map { $0 < snapshot.sequence } ?? false)
+
+        if input.recommendations.isEmpty || staleCallOnly {
             // 伺服器提供和牌時，絕不因為「模型沒意見」而放過。
             // 這裡曾經是漏和的成因，而且更糟的是榮和被歸類為 isCallOpportunity，
             // 會走到下面主動送「過」——等於自己棄和。
@@ -95,7 +111,7 @@ enum AutoPlayGate {
             // 「此刻推薦是空的」≠「模型決定不做」。
             // 輪詢與推論是非同步的：oplist 到達後約 50–100ms 才有結果，
             // 再經過一次同步才到得了這裡。搶在那之前送「過」不可逆，
-            // 而伺服器給 300 秒思考時間——等一下的代價是零。
+            // 而超過伺服器的副露視窗它自己會判過——等一下的代價是零。
             if input.now.timeIntervalSince(snapshot.capturedAt) < input.callPassGrace {
                 return .skip(.awaitingInference)
             }

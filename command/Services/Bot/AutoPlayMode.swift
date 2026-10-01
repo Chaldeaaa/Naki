@@ -118,10 +118,10 @@ enum AutoPlayAvailability {
 /// `AutoPlayMode` 的單一持久化來源。
 ///
 /// 全 App 只有 `naki.autoPlayMode` 一個 key。這個設定曾經散在兩個 key，
-/// 兩邊各存各的，UI picker 顯示的模式與實際採用的模式因此可以不一致；
+/// 兩邊各存各的，picker 顯示的模式與實際採用的模式因此可以不一致；
 /// `legacyKey` 只剩一次性遷移的用途，遷移後刪除，不要再新增第二個讀寫點。
 nonisolated enum AutoPlayModeStore {
-    /// 目前唯一的 key（`NakiRuntime` 與 `ContentView` 的 `@AppStorage` 共用）
+    /// 目前唯一的 key。UI 只讀 runtime 生效的模式，寫入只有 `setAutoPlayMode` 一個入口
     static let key = "naki.autoPlayMode"
 
     /// 被合併掉的舊 key（ContentView 舊版 `@AppStorage("AutoPlayMode")`）

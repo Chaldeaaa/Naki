@@ -80,6 +80,8 @@ nonisolated struct AutoPlayStall: Equatable {
     let consecutiveTicks: Int
     /// 這段停滯是從哪一批 oplist 開始的
     let sinceSequence: UInt64
+    /// 停滯已持續的實際秒數（拍數不等於秒數：一拍可能含送出延遲與重試）
+    var elapsedSeconds: Int = 0
 }
 
 /// 執行位的狀態。
@@ -161,9 +163,12 @@ final class AutoPlayEngine {
         var poll: TimeInterval = 1.0
         /// 副露機會在多久之後才允許「因為沒推薦而自動送過」
         ///
-        /// 只要比「oplist 到達 → 推論完成 → 推薦同步」的總延遲長就夠。
-        /// 實測該延遲在 100ms 量級，2 秒有 20 倍餘裕；伺服器等 300 秒，多等 2 秒沒有代價。
-        var callPassGrace: TimeInterval = 2.0
+        /// 要比「oplist 到達 → 推論完成 → 推薦同步」的總延遲長。context 沒有「推論進行中」
+        /// 的訊號可用，只能靠時間：live 曾見事件佇列延遲後推論 5 秒才到、雲端逾時預算 2 秒，
+        /// 2 秒會在推論完成前搶先送過（不可逆）。上限而已：實際寬限期不超過
+        /// 該批 `timeFixed - 1` 秒（見 `runCycle`）。段位場的等待會吃到長考時間，
+        /// 這是取捨——搶送「過」不可逆，晚送最壞是伺服器逾時自己判過。
+        var callPassGrace: TimeInterval = 8.0
         /// 和牌送出失敗的重試間隔（漏和不可逆，間隔短一點）
         var horaRetry: TimeInterval = 0.2
         /// 「過」送出失敗的重試間隔
@@ -189,10 +194,11 @@ final class AutoPlayEngine {
         var passPolicy: AutoPassDispatcher.RetryPolicy?
         /// 送出前的模擬人類延遲；nil＝用 `ActionDelayModel`（正式路徑）。
         ///
-        /// 第二個參數是使用者的延遲係數（`Context.actionDelayScale`）：seam 帶著它，
-        /// 測試才驗得到「引擎真的把 stepper 的值讀出來並往下傳」，而不是寫進去沒人讀的
-        /// 假控制。正式路徑（nil）走 `ActionDelayModel.delay(for:scale:)`。
-        var actionDelay: ((Recommendation.ActionType?, Double) -> TimeInterval)?
+        /// 第二個參數是使用者的延遲係數（`Context.actionDelayScale`），第三個是該批
+        /// 操作的總時限秒數（0＝未知）：seam 帶著它們，測試才驗得到「引擎真的把 stepper 與
+        /// 時限讀出來並往下傳」，而不是寫進去沒人讀的假控制。
+        /// 正式路徑（nil）走 `ActionDelayModel.delay(for:scale:deadline:)`。
+        var actionDelay: ((Recommendation.ActionType?, Double, TimeInterval) -> TimeInterval)?
 
         // MARK: 局間確認（confirmNewRound）
 
@@ -450,6 +456,11 @@ final class AutoPlayEngine {
         // 舊實作在這裡讀一次、延遲之後再讀一次，兩份可以不是同一批（TOCTOU）。
         let snapshot = store.pending
 
+        // 固定時間短的視窗（段位場 5 秒）容不下整段寬限期；timeFixed 未知（0）時用預設
+        let windowSeconds = Double(snapshot?.timeFixed ?? 0) / 1000
+        let grace = windowSeconds > 0
+            ? max(0, min(timing.callPassGrace, windowSeconds - 1)) : timing.callPassGrace
+
         let gate = AutoPlayGate.evaluate(.init(
             isAutoMode: ctx.mode.isFullAuto,
             isSanma: ctx.isSanma,
@@ -458,7 +469,8 @@ final class AutoPlayEngine {
             snapshot: snapshot,
             recommendations: ctx.recommendations,
             now: now,
-            callPassGrace: timing.callPassGrace))
+            callPassGrace: grace,
+            recommendationsOplistSequence: ctx.recommendationsOplistSequence))
 
         switch gate {
         case .skip(let reason):
@@ -520,7 +532,8 @@ final class AutoPlayEngine {
                                     // 摸切＝要打的正是這一巡摸到的那張
                                     tsumogiri: ctx.tsumoTile != nil
                                         && ctx.tsumoTile == top.displayTile,
-                                    scale: ctx.actionDelayScale)
+                                    scale: ctx.actionDelayScale,
+                                    deadline: (Double(snapshot.timeFixed) + Double(snapshot.timeAdd)) / 1000)
             guard debounce.allows(key: "\(top.actionType.rawValue)-\(top.displayTile)",
                                   isPass: top.actionType == .none,
                                   window: delay + 0.5,
@@ -553,15 +566,24 @@ final class AutoPlayEngine {
         }
 
         // 三麻 fail-closed（同 `AutoPlayGate` 規則）。手動觸發不經閘門，
-        // 要自己擋一次；雲端 3p 決策放行。
-        guard !ctx.isSanma || ctx.cloudDecision else {
+        // 要自己擋一次；雲端 3p 決策放行，伺服器授權的和牌也放行（resolver 會排在推薦之上）。
+        guard !ctx.isSanma || ctx.cloudDecision || store.pending?.horaOperation != nil else {
             note("⏭️ 三麻對局：本批推薦來自本地四麻模型，自動送出停用（雲端推薦才放行）", to: .log)
             return finish(gate: nil, outcome: .notSent(reason: "sanma_unsupported"))
         }
 
         guard let top = ctx.recommendations.first else {
-            note("無法觸發: 無推薦", to: .log)
-            return finish(gate: nil, outcome: .notSent(reason: "no_recommendation"))
+            // 伺服器授權的和牌不需要推薦（與輪詢路徑的 forceHora 同理），交給 resolver
+            guard let snapshot = store.pending, snapshot.horaOperation != nil else {
+                note("無法觸發: 無推薦", to: .log)
+                return finish(gate: nil, outcome: .notSent(reason: "no_recommendation"))
+            }
+            note("🎯 oplist 有和牌但模型無推薦 → 交給 resolver (ops=\(snapshot.rawTypes))", to: .event)
+            return await perform(requested: .hora,
+                                 requestedTile: snapshot.contextTile ?? "",
+                                 snapshot: snapshot,
+                                 delay: delay,
+                                 gate: nil)
         }
 
         // 沒有 oplist 就別排這次觸發：伺服器還沒授權，等下一批到達時輪詢會自己接手。
@@ -732,6 +754,10 @@ final class AutoPlayEngine {
         var attempt = 0
 
         while attempt < timing.maxAttempts {
+            // 延遲與重試間隔的 sleep 被取消時會立刻返回，不能接著把動作送出去
+            if Task.isCancelled {
+                return finish(gate: gate, outcome: .notSent(reason: "cancelled"))
+            }
             attempt += 1
 
             // ① 這批 oplist 還是閘門看到的那一批嗎？
@@ -756,7 +782,8 @@ final class AutoPlayEngine {
                 mode: ctx.mode,
                 seat: ctx.seat,
                 isSanma: ctx.isSanma,
-                cloudDecision: ctx.cloudDecision)
+                cloudDecision: ctx.cloudDecision,
+                recommendationsOplistSequence: ctx.recommendationsOplistSequence)
 
             let action: Recommendation.ActionType
             let tile: String
@@ -816,8 +843,10 @@ final class AutoPlayEngine {
                     // 和牌不可逆：放棄一定要留下原因，而且 oplist 保留給下一輪
                     note("❌ 和牌送出失敗 \(attempt) 次, 放棄 (\(result?.logLine ?? "no result"))",
                          to: .event)
+                    horaFailedSequence = snapshot.sequence
                 case .none:
-                    note("✅ Pass 已發送 (第 \(attempt) 次)", to: .log)
+                    note("❌ Pass 送出失敗 \(attempt) 次, 放棄 (\(result?.logLine ?? "no result"))",
+                         to: .event)
                 default:
                     note("❌ 已達最大重試次數 (\(attempt)), ops=\(snapshot.rawTypes)", to: .log)
                 }
@@ -865,15 +894,16 @@ final class AutoPlayEngine {
     private func actionDelay(for action: Recommendation.ActionType?,
                              tile: String? = nil,
                              tsumogiri: Bool = false,
-                             scale: Double) -> TimeInterval {
+                             scale: Double,
+                             deadline: TimeInterval = 0) -> TimeInterval {
         // 固定時序是指紋：正式路徑一律由 `ActionDelayModel` 抽樣，
         // `scale` 只縮放分布不取代它。使用者的基準秒數係數走 `Context.actionDelayScale`。
         //
         // `tile` 與 `tsumogiri` 是校準模型的兩個主要維度：真人對字牌／么九／中張的
         // 思考長度不同，而摸切又明顯比手切快（不必從手上挑牌）。
-        timing.actionDelay?(action, scale)
+        timing.actionDelay?(action, scale, deadline)
             ?? ActionDelayModel.delay(for: action, tile: tile,
-                                      tsumogiri: tsumogiri, scale: scale)
+                                      tsumogiri: tsumogiri, scale: scale, deadline: deadline)
     }
 
     private func retryLimit(for action: Recommendation.ActionType) -> Int {
@@ -937,15 +967,21 @@ final class AutoPlayEngine {
         } else {
             lastNonSendReason = nil
         }
-        updateStall(reason: reason)
+        // 等推論的寬限期不算停滯；非自動類模式本來就不會送，不累計
+        if outcome != .skipped(.awaitingInference) {
+            updateStall(reason: context().mode.isFullAuto ? reason : nil)
+        }
         return AutoPlayCycle(gate: gate, outcome: outcome, log: trace, overrode: overrode)
     }
 
     /// 幾拍沒動作才算停滯。
     ///
-    /// 輪詢是一秒一拍，而 `callPassGrace` 本來就會讓副露機會等 2 秒推論，
-    /// 所以門檻要在那之上；伺服器給 300 秒思考時間，等到第 4 拍才出聲不會太晚。
+    /// 輪詢是一秒一拍；等推論的寬限期（`awaitingInference`）不計入，
+    /// 所以第 4 拍才出聲對伺服器的思考時間來說不會太晚。
     private static let stallTickThreshold = 4
+
+    /// 和牌重試用盡的那一批 oplist 序號：該批的停滯警示立刻顯示、不等門檻。
+    private var horaFailedSequence: UInt64?
 
     /// 更新停滯狀態。
     ///
@@ -955,6 +991,7 @@ final class AutoPlayEngine {
         guard let reason, let pending = store.pending else {
             // 送出成功，或這一拍根本沒有決策機會 → 停滯結束
             stallTicks = 0
+            horaFailedSequence = nil
             if reportedStall != nil {
                 reportedStall = nil
                 onStallChanged(nil)
@@ -963,11 +1000,15 @@ final class AutoPlayEngine {
         }
 
         stallTicks += 1
-        guard stallTicks >= Self.stallTickThreshold else { return }
+        // 和牌送不出去不可逆：不等門檻，訊息直說要手動操作
+        let horaFailed = horaFailedSequence == pending.sequence
+        guard horaFailed || stallTicks >= Self.stallTickThreshold else { return }
 
-        let stall = AutoPlayStall(reason: reason,
-                                  consecutiveTicks: stallTicks,
-                                  sinceSequence: pending.sequence)
+        let stall = AutoPlayStall(
+            reason: horaFailed ? "和牌送不出去，請手動操作" : reason,
+            consecutiveTicks: stallTicks,
+            sinceSequence: pending.sequence,
+            elapsedSeconds: Int(timing.clock().timeIntervalSince(pending.capturedAt)))
         // 只在真的變化時往外送（`consecutiveTicks` 每拍都變，所以這其實是每拍一次；
         // 這是刻意的——UI 要能顯示「卡了幾秒」，而不是只有第一次。）
         guard stall != reportedStall else { return }

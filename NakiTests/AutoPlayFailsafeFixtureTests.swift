@@ -76,7 +76,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
 
         let snapshot = store.record(seat: 0,
                                     operations: [LiqiOperation(type: .tsumo)],
-                                    timeFixed: 300,
+                                    timeFixed: 300_000,
                                     contextTile: "5p",
                                     source: "ActionDealTile")
 
@@ -204,7 +204,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
                      operations: [LiqiOperation(type: .discard),
                                   LiqiOperation(type: .riichi),
                                   LiqiOperation(type: .tsumo)],
-                     timeFixed: 300,
+                     timeFixed: 300_000,
                      contextTile: "3s",
                      source: "ActionDealTile")
 
@@ -298,7 +298,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
         let ron = store.record(seat: 0,
                                operations: [LiqiOperation(type: .pon),
                                             LiqiOperation(type: .ron)],
-                               timeFixed: 300,
+                               timeFixed: 300_000,
                                contextTile: "5p",
                                source: "ActionDiscardTile")
         XCTAssertGreaterThan(ron.sequence, stale.sequence)
@@ -343,7 +343,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
         store.record(seat: 0,
                      operations: [LiqiOperation(type: .discard),
                                   LiqiOperation(type: .tsumo)],
-                     timeFixed: 300,
+                     timeFixed: 300_000,
                      contextTile: "3s",
                      source: "ActionDealTile")
 
@@ -380,7 +380,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
         store.record(seat: 0,
                      operations: [LiqiOperation(type: .discard),
                                   LiqiOperation(type: .tsumo)],
-                     timeFixed: 300,
+                     timeFixed: 300_000,
                      contextTile: "3s",
                      source: "ActionDealTile")
 
@@ -414,7 +414,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
 
         let fresh = store.record(seat: 0,
                                  operations: [LiqiOperation(type: .discard)],
-                                 timeFixed: 300,
+                                 timeFixed: 300_000,
                                  contextTile: "7p",
                                  source: "ActionDealTile")
 
@@ -452,10 +452,10 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
             operations: [LiqiOperation(type: .pon, combination: ["5m|5m"]),
                          LiqiOperation(type: .ron)],
             timeAdd: 0,
-            timeFixed: 300,
+            timeFixed: 300_000,
             contextTile: "5m",
             source: "ActionDiscardTile",
-            capturedAt: Date(timeIntervalSinceNow: -3.0)))
+            capturedAt: Date(timeIntervalSinceNow: -(AutoPlayEngine.Timing.live.callPassGrace + 1))))
 
         let run = await AutoPlayFailsafePipeline(
             store: store, sender: sender, recommendations: []).run()
@@ -522,10 +522,10 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
             seat: 0,
             operations: [LiqiOperation(type: .pon, combination: ["5m|5m"])],
             timeAdd: 0,
-            timeFixed: 300,
+            timeFixed: 300_000,
             contextTile: "5m",
             source: "ActionDiscardTile",
-            capturedAt: Date(timeIntervalSinceNow: -3.0)))
+            capturedAt: Date(timeIntervalSinceNow: -(AutoPlayEngine.Timing.live.callPassGrace + 1))))
 
         let run = await AutoPlayFailsafePipeline(
             store: store, sender: sender, recommendations: [], maxAttempts: 3).run()
@@ -546,7 +546,7 @@ final class AutoPlayFailsafeFixtureTests: XCTestCase {
         store.injectForTesting(LiqiOperationSnapshot(
             sequence: 42, seat: 0,
             operations: [LiqiOperation(type: .tsumo)],
-            timeAdd: 0, timeFixed: 300,
+            timeAdd: 0, timeFixed: 300_000,
             contextTile: "5p", source: "injected", capturedAt: Date()))
         XCTAssertEqual(store.pending?.sequence, 42)
 

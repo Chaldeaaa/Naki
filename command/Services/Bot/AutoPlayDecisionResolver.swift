@@ -49,12 +49,14 @@ nonisolated struct AutoPlayDecisionResolver {
     ///   - seat: 自家座位，用來確認這批 oplist 確實是給我們的
     ///   - isSanma: 這局是不是三麻。true 時**一律不自動送出**（見下方 fail-closed 說明）。
     ///     預設 false 只是為了不動舊測試，正式路徑必須明確傳 `gameState.is3P`。
+    ///   - recommendationsOplistSequence: 推薦是針對哪一批 oplist 算的；退次選的前提（見下方）
     static func resolve(snapshot: LiqiOperationSnapshot?,
                         recommendations: [Recommendation],
                         mode: AutoPlayMode,
                         seat: Int,
                         isSanma: Bool = false,
-                        cloudDecision: Bool = false) -> AutoPlayDecision {
+                        cloudDecision: Bool = false,
+                        recommendationsOplistSequence: UInt64? = nil) -> AutoPlayDecision {
 
         // 三麻 fail-closed：自動模式降級成「只顯示、不送出」。
         //
@@ -83,12 +85,12 @@ nonisolated struct AutoPlayDecisionResolver {
 
         // ── 終局保護：伺服器說可以和，就一定和 ──────────────────────
         //
-        // 這條**凌駕 AI 推薦**。Mortal 可能因為狀態編碼或役種判定的差異
+        // 這條**凌駕 AI 推薦**，也不吃三麻降級（`effectiveMode`）：和牌不需要模型。Mortal 可能因為狀態編碼或役種判定的差異
         // 而沒把和牌排在第一，但「能不能和」的權威在伺服器不在模型；
         // 模型只該決定「和的價值」，不該決定「能不能和」。
         if let hora = snapshot.horaOperation {
             let tile = snapshot.contextTile ?? ""
-            switch effectiveMode {
+            switch mode {
             case .auto, .fullAuto:
                 return .send(action: .hora, tile: tile)
             case .recommend:
@@ -99,7 +101,7 @@ nonisolated struct AutoPlayDecisionResolver {
         }
 
         // ── 其餘動作：照 AI 的第一推薦 ────────────────────────────
-        guard let top = recommendations.first else {
+        guard let first = recommendations.first else {
             // 有副露機會但模型沒有意見 → 送「過」，否則對局會停在那裡等我們回應
             if snapshot.isCallOpportunity {
                 return effectiveMode.isFullAuto
@@ -109,9 +111,13 @@ nonisolated struct AutoPlayDecisionResolver {
             return .none(reason: "no_recommendation")
         }
 
-        // 推薦的動作必須真的在 oplist 裡，否則是拿舊推薦操作新 oplist
-        guard isSupported(top.actionType, by: snapshot) else {
-            return .none(reason: "action_\(top.actionType.rawValue)_not_in_oplist\(snapshot.rawTypes)")
+        // 推薦的動作必須真的在 oplist 裡，否則是拿舊推薦操作新 oplist。
+        // 首選沒有授權時只退到同一批推論的打牌或過：吃碰槓立直不可逆，且可能來自別的決策點。
+        let fallbacks = recommendationsOplistSequence == snapshot.sequence
+            ? recommendations.dropFirst().filter { $0.actionType == .discard || $0.actionType == .none }
+            : []
+        guard let top = ([first] + fallbacks).first(where: { isSupported($0.actionType, by: snapshot) }) else {
+            return .none(reason: "action_\(first.actionType.rawValue)_not_in_oplist\(snapshot.rawTypes)")
         }
 
         switch effectiveMode {

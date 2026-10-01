@@ -97,10 +97,13 @@ struct ActionDelayModel {
     /// 只在測試時開；正常對局用會讓每一手都明顯變慢。
     static var verificationScale: Double = 1.0
 
-    /// 上限。伺服器實測給 300 秒思考時間，這個上限純粹是保護——
-    /// 延遲再長也不該讓對局停住。**不隨 `scale` 放大**：它的職責是一條與使用者偏好
-    /// 無關的保護線。
+    /// 上限。這個上限純粹是保護——延遲再長也不該讓對局停住。
+    /// **不隨 `scale` 放大**：它的職責是一條與使用者偏好無關的保護線。
+    /// 伺服器實際給的時限更短時，由呼叫端傳 `deadline` 收得更緊。
     static let maximum: TimeInterval = 12.0
+
+    /// 伺服器時限（`deadline`）內留給送出與網路往返的安全餘裕
+    static let deadlineMargin: TimeInterval = 2.0
 
     // MARK: - 牌種
 
@@ -140,11 +143,14 @@ struct ActionDelayModel {
     ///   - scale: 使用者的基準秒數係數（`SettingsStore.actionDelayScale`）。
     ///     乘在**整個抽樣值**上，所以拉長的是分布本身而不是換成固定值——
     ///     防偵測的隨機性保留。`maximum` 不隨它縮放。
+    ///   - deadline: 伺服器給的總時限秒數（`timeFixed + timeAdd` 是毫秒，呼叫端先換算）；> 0 時延遲夾在
+    ///     `deadline - deadlineMargin` 以內（下限 0），0＝未知，只受 `maximum` 限制
     ///   - generator: 注入亂數來源以便測試；正式路徑用系統預設
     static func delay(for actionType: Recommendation.ActionType?,
                       tile: String? = nil,
                       tsumogiri: Bool = false,
                       scale: Double = 1.0,
+                      deadline: TimeInterval = 0,
                       using generator: inout some RandomNumberGenerator) -> TimeInterval {
         var seconds: Double
 
@@ -173,7 +179,8 @@ struct ActionDelayModel {
             seconds += 2.0 + sample(tankExtra, using: &generator)
         }
 
-        return min(seconds * scale * verificationScale, maximum)
+        let cap = deadline > 0 ? min(maximum, max(0, deadline - deadlineMargin)) : maximum
+        return min(seconds * scale * verificationScale, cap)
     }
 
     /// 打牌：routine 快切與真思考的混合
@@ -206,9 +213,10 @@ struct ActionDelayModel {
     static func delay(for actionType: Recommendation.ActionType?,
                       tile: String? = nil,
                       tsumogiri: Bool = false,
-                      scale: Double = 1.0) -> TimeInterval {
+                      scale: Double = 1.0,
+                      deadline: TimeInterval = 0) -> TimeInterval {
         var g = SystemRandomNumberGenerator()
         return delay(for: actionType, tile: tile, tsumogiri: tsumogiri,
-                     scale: scale, using: &g)
+                     scale: scale, deadline: deadline, using: &g)
     }
 }

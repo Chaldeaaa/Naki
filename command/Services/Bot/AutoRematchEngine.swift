@@ -85,6 +85,8 @@ final class AutoRematchEngine {
     /// 大廳 session 探針（剛回大廳時 socket 可能還沒完成登入）
     private let lobbyProbe: () async -> Bool
     private let log: (String) -> Void
+    /// 續局失敗結局的狀態訊息（畫面上看得到；log 之外的第二條通道）
+    private let onFailure: (String) -> Void
 
     // MARK: - 時間常數
 
@@ -103,6 +105,7 @@ final class AutoRematchEngine {
          startMatch: @escaping (String, String) async -> Bool,
          lobbyProbe: @escaping () async -> Bool,
          log: @escaping (String) -> Void,
+         onFailure: @escaping (String) -> Void = { _ in },
          settleDelay: Duration = .seconds(45),
          probeInterval: Duration = .seconds(3),
          maxProbes: Int = 20,
@@ -114,6 +117,7 @@ final class AutoRematchEngine {
         self.startMatch = startMatch
         self.lobbyProbe = lobbyProbe
         self.log = log
+        self.onFailure = onFailure
         self.settleDelay = settleDelay
         self.probeInterval = probeInterval
         self.maxProbes = maxProbes
@@ -161,6 +165,13 @@ final class AutoRematchEngine {
 
     // MARK: - 主流程
 
+    /// 續局失敗的結局：留 log，並讓畫面知道全自動循環已經停住。
+    private func fail(_ message: String, _ outcome: Outcome) -> Outcome {
+        log(message)
+        onFailure("全自動續局已停止：" + message.replacingOccurrences(of: "[自動續局] ", with: ""))
+        return outcome
+    }
+
     /// 完整的續局流程。回傳結論供測試斷言。
     ///
     /// - Parameter skipSettle: 跳過結算緩衝。只有 `startNow()`（在大廳按下「開始」）
@@ -183,8 +194,7 @@ final class AutoRematchEngine {
             return .cancelled
         }
         guard context().isReady else {
-            log("[自動續局] 送出通道未就緒，放棄續局")
-            return .notReady
+            return fail("[自動續局] 送出通道未就緒，放棄續局", .notReady)
         }
 
         let sanma = context().prefersSanma
@@ -193,9 +203,8 @@ final class AutoRematchEngine {
         // 三麻只有雲端路徑（bundled 模型的 obs 1012×34 對三麻結構性無效）。
         // 沒有雲端還自動排三麻＝把帳號送進一場自己不會出手的對局。
         if sanma && !context().cloudInferenceActive {
-            log("[自動續局] 選了三麻但雲端推論未啟用，不排隊——"
-                + "三麻只有雲端路徑，排進去也不會出手。")
-            return .sanmaWithoutCloud
+            return fail("[自動續局] 選了三麻但雲端推論未啟用，不排隊——"
+                        + "三麻只有雲端路徑，排進去也不會出手。", .sanmaWithoutCloud)
         }
 
         // 段位決定能進哪些房間；取不到就讓 resolver 退回「沿用上次那個房間」
@@ -209,9 +218,9 @@ final class AutoRematchEngine {
             east: context().prefersEast,
             preference: context().roomPreference,
             observations: observations()) else {
-            log("[自動續局] 還沒有可用的\(kind) match_sid，不排隊。"
-                + "請先自己點一次\(kind)的場次入口打一場，Naki 會記下來。")
-            return .noObservedSid(sanma: sanma)
+            return fail("[自動續局] 還沒有可用的\(kind) match_sid，不排隊。"
+                        + "請先自己點一次\(kind)的場次入口打一場，Naki 會記下來。",
+                        .noObservedSid(sanma: sanma))
         }
 
         // 推導出來的候選要講明白，不要讓推論看起來像事實
@@ -230,8 +239,7 @@ final class AutoRematchEngine {
             try? await Task.sleep(for: probeInterval)
         }
         guard lobbyReady else {
-            log("[自動續局] 大廳連線探針一直不通，放棄續局")
-            return .lobbyNotReady
+            return fail("[自動續局] 大廳連線探針一直不通，放棄續局", .lobbyNotReady)
         }
 
         for attempt in 1...maxAttempts {
@@ -253,8 +261,8 @@ final class AutoRematchEngine {
 
         // 不無限重試：連續被拒通常代表 sid 過期或帳號狀態不對，
         // 一直送只會把錯誤重複到看不見。停手並留下 log。
-        log("[自動續局] ❌ \(maxAttempts) 次都未被接受，停止續局")
-        return .rejected(attempts: maxAttempts)
+        return fail("[自動續局] ❌ \(maxAttempts) 次都未被接受，停止續局",
+                    .rejected(attempts: maxAttempts))
     }
 }
 

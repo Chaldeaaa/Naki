@@ -363,8 +363,7 @@ struct ScoreRow: View {
 /// 東 1 局剛好對，之後每過一局就錯一位——2026-08-09 人機場實測東 2 局時，
 /// 摘要條說我是「南家」，而同一畫面的點數列把我的 33,000 標成「西」。
 ///
-/// 風位從莊家算起，莊家是 `(kyoku - 1) % 家數`——與 `GameState.kyokuDisplayName`
-/// 推局數用的是同一個式子。抽出來是為了讓 `SeatWindTests` 直接鎖住它：
+/// 風位從莊家算起，莊家是 `(kyoku - 1) % 家數`（`kyokuDisplayName` 只顯示場風與局數，不推莊家）。抽出來是為了讓 `SeatWindTests` 直接鎖住它：
 /// 這種「差一位」的錯誤在東 1 局看不出來，而東 1 局正是所有 Preview 的預設值。
 enum SeatWind {
     private static let winds = ["東", "南", "西", "北"]
@@ -674,7 +673,7 @@ struct DecisionAlerts: View {
             if let stall = autoPlayStall {
                 alert(icon: "pause.circle.fill",
                       tone: .red,
-                      text: "自動打牌停滯 \(stall.consecutiveTicks) 秒——伺服器已給機會但沒送出（\(stall.reason)）")
+                      text: "自動打牌停滯 \(stall.elapsedSeconds) 秒——伺服器已給機會但沒送出（\(stall.reason)）")
                     .accessibilityIdentifier("autoplay-stall-indicator")
             }
 

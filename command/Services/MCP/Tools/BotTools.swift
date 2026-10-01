@@ -57,11 +57,22 @@ struct BotTriggerTool: MCPTool {
         guard let nakiContext = context as? NakiMCPContext else {
             throw MCPToolError.notAvailable("Naki context")
         }
+        // 引擎那一輪的 outcome 拿不到（`TriggerAutoPlayAction` 是射後不理），
+        // 所以只先擋下明知不會送的情況；success 只代表「已排進引擎下一輪」
+        // 伺服器授權的和牌不需要推薦，引擎會交給 resolver
+        let recommendations = nakiContext.getBotStatus()?["recommendations"] as? [Any] ?? []
+        if recommendations.isEmpty, LiqiOperationStore.shared.pending?.horaOperation == nil {
+            return ["success": false, "error": "no_recommendation", "queued": false]
+        }
+        if LiqiOperationStore.shared.pending == nil {
+            return ["success": false, "error": "no_oplist", "queued": false]
+        }
         context.log("MCP: Manual auto-play trigger requested")
         nakiContext.triggerAutoPlay()
         return [
             "success": true,
-            "message": "Auto-play triggered"
+            "queued": true,
+            "note": "已排進引擎下一輪；三麻 fail-closed、stale、Legacy path 仍可能不送，結果看 bot_status／get_logs"
         ]
     }
 }
@@ -131,7 +142,7 @@ struct BotDeepTool: MCPTool {
         let responses = LiqiResponseStore.shared
         result["recentResponses"] = responses.recentResponses.map { $0.dictionary }
         result["broadcasts"] = responses.broadcasts.map { $0.dictionary }
-        result["note"] = "recentResponses 只含 Naki 自己送出（msgId >= 60000）的請求回應"
+        result["note"] = "recentResponses 只含 Naki 自己送出（msgId 登記制認領）的請求回應"
 
         return result
     }
@@ -166,7 +177,7 @@ struct BotChiTool: MCPTool {
             throw MCPToolError.notAvailable("Naki context")
         }
 
-        let index = UInt32(max(0, arguments["index"] as? Int ?? 0))
+        let index = try MCPArguments.uint32(arguments, "index")
         let awaitMs = arguments["awaitResponseMs"] as? Int ?? 800
 
         let spec = LiqiRequestBuilder.chi(index: index)
@@ -207,7 +218,7 @@ struct BotPonTool: MCPTool {
             throw MCPToolError.notAvailable("Naki context")
         }
 
-        let index = UInt32(max(0, arguments["index"] as? Int ?? 0))
+        let index = try MCPArguments.uint32(arguments, "index")
         let awaitMs = arguments["awaitResponseMs"] as? Int ?? 800
 
         let spec = LiqiRequestBuilder.pon(index: index)
