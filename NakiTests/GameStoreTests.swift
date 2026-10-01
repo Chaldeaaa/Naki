@@ -201,6 +201,112 @@ final class GameStoreTests: XCTestCase {
     }
 }
 
+// MARK: - 局況顯示與 controller 顯示狀態
+
+/// `kyoku` 是場風內的局序（ju + 1，`MajsoulBridge.parseNewRound`），南場也是 1-4。
+@MainActor
+final class NativeBotDisplayStateTests: XCTestCase {
+
+    func testKyokuDisplayNameFollowsBakaze() {
+        var state = GameState()
+        XCTAssertEqual(state.kyokuDisplayName, "東1局")
+        state.kyoku = 3
+        state.bakaze = .south
+        XCTAssertEqual(state.kyokuDisplayName, "南3局", "南場 kyoku 仍是 1-4，不得顯示成東N局")
+        state.bakaze = .west
+        XCTAssertEqual(state.kyokuDisplayName, "西3局")
+    }
+
+    func testChiDisplayLabelClampsNegativeIndex() {
+        let rec = Recommendation(actionType: .chi, probability: 0.5, label: "chi_-1")
+        XCTAssertEqual(rec.displayLabel, "吃①")
+    }
+
+    /// 三麻 controller（雲端-only，不需要模型檔）並開一局，玩家 0 的起手為 `hand`
+    private func makeController(hand: [String]) async throws -> NativeBotController {
+        let controller = NativeBotController()
+        try controller.createBot(playerId: 0, is3P: true)
+        let filler = [String](repeating: "?", count: 13)
+        _ = try await controller.react(event: [
+            "type": "start_kyoku", "bakaze": "E", "kyoku": 1, "honba": 0, "kyotaku": 0,
+            "scores": [35000, 35000, 35000], "dora_marker": "C", "oya": 0,
+            "tehais": [hand, filler, filler]])
+        return controller
+    }
+
+    private let hand = ["1m", "1m", "1m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E"]
+
+    /// 暗槓用的是手裡四張、剛摸的是別張：摸的那張要併回手牌，不能被嶺上牌蓋掉
+    func testAnkanFromHandKeepsDrawnTile() async throws {
+        let controller = try await makeController(hand: hand)
+        _ = try await controller.react(event: ["type": "tsumo", "actor": 0, "pai": "S"])
+        _ = try await controller.react(event: [
+            "type": "ankan", "actor": 0, "consumed": ["1m", "1m", "1m", "1m"]])
+        XCTAssertNil(controller.tsumo)
+        XCTAssertEqual(controller.tehai.count, 10)
+        XCTAssertTrue(controller.tehaiMjai.contains("S"), "剛摸的 S 不得消失")
+
+        _ = try await controller.react(event: ["type": "tsumo", "actor": 0, "pai": "P"])
+        XCTAssertEqual(controller.lastTsumo, "P")
+        XCTAssertTrue(controller.tehaiMjai.contains("S"))
+        XCTAssertEqual(controller.tehai.count, 10)
+    }
+
+    /// 剛摸的就是槓的第四張：tsumo 要清掉，不殘留
+    func testAnkanUsingDrawnTileClearsTsumo() async throws {
+        let controller = try await makeController(hand: [
+            "1m", "1m", "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E"])
+        _ = try await controller.react(event: ["type": "tsumo", "actor": 0, "pai": "1m"])
+        _ = try await controller.react(event: [
+            "type": "ankan", "actor": 0, "consumed": ["1m", "1m", "1m", "1m"]])
+        XCTAssertNil(controller.tsumo)
+        XCTAssertEqual(controller.tehai.count, 10)
+        XCTAssertFalse(controller.tehaiMjai.contains("1m"))
+    }
+
+    /// 加槓：離開手牌的只有加上去的那張，consumed（先前碰出的三張）不在手裡
+    func testKakanRemovesOnlyAddedTile() async throws {
+        let controller = try await makeController(hand: [
+            "1m", "2m", "3m", "4p", "5p", "6p", "7s", "8s", "9s", "E", "E", "S", "S"])
+        _ = try await controller.react(event: ["type": "tsumo", "actor": 0, "pai": "P"])
+        _ = try await controller.react(event: [
+            "type": "kakan", "actor": 0, "pai": "1m", "consumed": ["1m", "1m", "1m"]])
+        XCTAssertNil(controller.tsumo)
+        XCTAssertFalse(controller.tehaiMjai.contains("1m"))
+        XCTAssertTrue(controller.tehaiMjai.contains("P"))
+        XCTAssertEqual(controller.tehai.count, 13)
+
+        // 加上去的就是剛摸的那張
+        _ = try await controller.react(event: ["type": "tsumo", "actor": 0, "pai": "2m"])
+        _ = try await controller.react(event: [
+            "type": "kakan", "actor": 0, "pai": "2m", "consumed": ["2m", "2m", "2m"]])
+        XCTAssertNil(controller.tsumo)
+        XCTAssertEqual(controller.tehai.count, 13)
+        XCTAssertEqual(controller.tehaiMjai.filter { $0 == "2m" }.count, 1, "手裡原有的那張 2m 不能被一起移除")
+    }
+
+    func testDoraAndReachAcceptedUpdateDisplayState() async throws {
+        let controller = try await makeController(hand: hand)
+        XCTAssertEqual(controller.doraMarkers.map(\.mjaiString), ["C"])
+
+        _ = try await controller.react(event: ["type": "dora", "dora_marker": "2m"])
+        XCTAssertEqual(controller.doraMarkers.map(\.mjaiString), ["C", "2m"])
+
+        _ = try await controller.react(event: ["type": "reach_accepted", "actor": 1])
+        XCTAssertEqual(controller.scores[1], 34000)
+        XCTAssertEqual(controller.kyotaku, 1)
+    }
+
+    /// 已有寶牌再連翻兩張（連槓）：每張都要累積，順序不變
+    func testMultipleDoraFlipsAccumulate() async throws {
+        let controller = try await makeController(hand: hand)
+        _ = try await controller.react(event: ["type": "dora", "dora_marker": "2m"])
+        _ = try await controller.react(event: ["type": "dora", "dora_marker": "3p"])
+        _ = try await controller.react(event: ["type": "dora", "dora_marker": "4s"])
+        XCTAssertEqual(controller.doraMarkers.map(\.mjaiString), ["C", "2m", "3p", "4s"])
+    }
+}
+
 // MARK: - 結構鎖（合併後只准有一份）
 
 /// 「四份拷貝 → 兩份」是結構性約束，型別系統看不見，只能掃原始碼。

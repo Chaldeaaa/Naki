@@ -63,6 +63,11 @@ final class GameStore {
     /// ——那會被下一個事件蓋掉。使用者看到的是空白頁面與一句稍縱即逝的文字。
     var pageLoadFailure: String?
 
+    /// Bot 推論失敗的原因；nil = 正常（下一次成功的 bot 回應會清掉）。
+    ///
+    /// 原本只寫進 `statusMessage`，會被下一則訊息蓋掉，畫面停在沒有推薦而無人知道原因。
+    var botFailure: String?
+
     /// 自動打牌停滯中（伺服器給了機會卻連續沒動作）；nil = 正常。
     ///
     /// 引擎所有的失敗與略過原本只走 log，而側欄的綠點讀的是 `botStatus.isActive`
@@ -190,5 +195,6 @@ final class GameStore {
         tsumoTile = nil
         highlightedTile = nil
         autoPlayStall = nil
+        botFailure = nil
     }
 }

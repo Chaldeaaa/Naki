@@ -155,7 +155,7 @@ class NativeBotController {
             // 不會有本地無效輸出頂上；設定啟用後下一批授權即生效。
             bot = CloudBot(local: nil, playerId: playerId, is3P: true,
                            configProvider: cloudConfigProvider ?? { nil },
-                           serverAuthorization: { LiqiOperationStore.shared.pending != nil })
+                           serverAuthorization: { LiqiOperationStore.shared.pending?.sequence == $0 })
         } else {
             // 內建引擎經 handProvider 讀 controller 的手牌——手牌是**遊戲**狀態，
             // 權威在 `updateInternalState`（UI/MCP 匯出也讀同一份），引擎只讀不寫。
@@ -167,7 +167,8 @@ class NativeBotController {
             // Replay／單測沒有 provider ⇒ 純本地，決策指紋天然穩定
             if let provider = cloudConfigProvider {
                 bot = CloudBot(local: local, playerId: playerId, is3P: false,
-                               configProvider: provider)
+                               configProvider: provider,
+                               serverAuthorization: { LiqiOperationStore.shared.pending?.sequence == $0 })
             } else {
                 bot = local
             }
@@ -253,6 +254,11 @@ class NativeBotController {
             reaction = try await bot.react(events: [event])
         } catch {
             botLog("[NativeBotController] ERROR: bot.react threw error: \(error)")
+            // 上一個成功事件的推薦已不對應現在的牌局，留著會被當成當前推薦
+            if gen == generation {
+                lastRecommendations = []
+                lastRecommendationsOplistSequence = nil
+            }
             throw error
         }
 
@@ -269,6 +275,12 @@ class NativeBotController {
             // 注意：不清空 lastRecommendations
             // 讓推薦保持到下一次需要做決定時（provenance 也一起保持不動）
             // 只有在新的推薦產生時才會更新
+            //
+            // 例外：三麻雲端-only 在新授權上回 nil ＝ 這一手沒有雲端決策（失敗／退避），
+            // 決策來源不能黏著上一手的 "cloud:"，否則 `AutoPlayGate` 會把它當雲端決策放行
+            if is3P, let eventOplistSeq, eventOplistSeq != lastRecommendationsOplistSequence {
+                lastDecisionSource = "local"
+            }
             return nil
         }
 
@@ -355,10 +367,20 @@ class NativeBotController {
             // 與側欄手牌顯示全都會是錯的。
             handleDahaiDict(event)
 
-        case "reach", "reach_accepted":
-            // 立直相關
-            botLog("[NativeBotController] reach/reach_accepted event")
+        case "reach":
             break
+
+        case "reach_accepted":
+            // 立直棒進供託、宣告者扣 1000（bridge 不帶 scores，下一個 start_kyoku 會校正）
+            if let actor = event["actor"] as? Int, scores.indices.contains(actor) {
+                scores[actor] &-= 1000
+                kyotaku += 1
+            }
+
+        case "dora":
+            if let marker = event["dora_marker"] as? String, let tile = Tile(mjaiString: marker) {
+                doraMarkers.append(tile)
+            }
 
         case "chi", "pon", "daiminkan", "kakan", "ankan":
             handleMeldDict(event)
@@ -488,13 +510,27 @@ class NativeBotController {
             return
         }
 
-        if let consumed = event["consumed"] as? [String] {
-            for tileStr in consumed {
-                if let tile = Tile(mjaiString: tileStr),
-                   let index = tehai.firstIndex(of: tile) {
-                    tehai.remove(at: index)
-                }
+        // 離開手牌的牌：加槓只有加上去的那張（consumed 是先前碰出去的三張，不在手裡）
+        let leaving: [String]
+        if event["type"] as? String == "kakan" {
+            leaving = (event["pai"] as? String).map { [$0] } ?? []
+        } else {
+            leaving = event["consumed"] as? [String] ?? []
+        }
+        for tileStr in leaving {
+            guard let tile = Tile(mjaiString: tileStr) else { continue }
+            if let index = tehai.firstIndex(of: tile) {
+                tehai.remove(at: index)
+            } else if tsumo == tile {
+                tsumo = nil
             }
+        }
+
+        // 槓的是手裡原有的牌時，剛摸的那張留下來——併回手牌，否則嶺上牌會蓋掉它
+        if let t = tsumo {
+            tehai.append(t)
+            tehai.sort { $0.index < $1.index }
+            tsumo = nil
         }
     }
 
@@ -595,7 +631,7 @@ enum NativeBotError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .botNotInitialized:
-            return "Bot 尚未初始化"
+            return "沒有 bot（座位未取得或尚未建立，不是模型推論錯誤）"
         case .invalidEvent:
             return "無效的事件格式"
         case .reactionFailed(let message):

@@ -14,7 +14,7 @@ import MortalSwift
 
 /// 遊戲狀態（強類型版本）
 struct GameState: Equatable {
-    /// 局數 (1-4 for 東1-東4, 5-8 for 南1-南4, etc.)
+    /// 場風內的局序 (1-4)＝莊家座位 + 1；南場也是 1-4，場風看 `bakaze`
     var kyoku: Int = 1
     /// 本場
     var honba: Int = 0
@@ -35,14 +35,9 @@ struct GameState: Equatable {
 
     // MARK: - Computed Properties
 
-    /// 局的顯示名稱 (e.g., "東1局")
+    /// 局的顯示名稱 (e.g., "東1局")。`kyoku` 是該場風內的局序（ju + 1），場風看 `bakaze`
     var kyokuDisplayName: String {
-        let winds = ["東", "南", "西", "北"]
-        let playerCount = is3P ? 3 : 4
-        let windIndex = (kyoku - 1) / playerCount
-        let roundNum = ((kyoku - 1) % playerCount) + 1
-        let windName = windIndex < winds.count ? winds[windIndex] : "?"
-        return "\(windName)\(roundNum)局"
+        "\(bakazeDisplay)\(kyoku)局"
     }
 
     /// 自風顯示
@@ -389,7 +384,7 @@ struct Recommendation: Identifiable, Equatable {
             // chi_0, chi_1, chi_2 -> 吃①, 吃②, 吃③
             if label.hasPrefix("chi_"), let idx = Int(String(label.dropFirst(4))) {
                 let symbols = ["①", "②", "③"]
-                return "吃\(symbols[min(idx, 2)])"
+                return "吃\(symbols[max(0, min(idx, 2))])"
             }
             return "吃"
         case .pon: return "碰"

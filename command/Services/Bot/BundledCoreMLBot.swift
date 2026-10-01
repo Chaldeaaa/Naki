@@ -116,8 +116,7 @@ final class BundledCoreMLBot: MahjongBot {
             if isMyMeld {
                 botLog("[BundledCoreMLBot] 自己碰/吃後，需要選擇打牌")
                 let recommendations = await recommendationsFromCurrentMask()
-                // forced 不在這條路量：這裡的 mask 有多層合成 fallback
-                //（空 mask 時由手牌重建），不是引擎決策當下的合法集快照
+                // forced 不在這條路量：這不是 `react` 決策當下的合法集快照
                 return BotReaction(action: nil, recommendations: recommendations,
                                    source: "local")
             }
@@ -168,76 +167,26 @@ final class BundledCoreMLBot: MahjongBot {
                 mask.filter { $0 == 1 }.count)
     }
 
-    /// 使用當前 mask 更新推薦（用於碰/吃後，需要打牌的情況）
-    /// 這個方法會嘗試執行推理來獲取真正的概率
+    /// 自家吃／碰／大明槓之後，對當前狀態推論出捨牌推薦。
+    ///
+    /// 副露後 MJAI 不會再送事件，`react` 沒被呼叫過，`lastProbs`／`lastMask` 停在
+    /// 副露前那一次——手牌早就變了，所以必須對**當前狀態**重新推論。
+    /// 推論拿不到（失敗、或沒有合法動作如大明槓）就回空推薦：舊的 probs／mask
+    /// 或均勻分布都不是模型對這手牌的判斷，自動打牌會把它當模型判斷打出去。
+    /// 寧可不送、讓伺服器逾時代打。
     private func recommendationsFromCurrentMask() async -> [Recommendation] {
-        // ⭐ 碰/吃後，libriichi 不會立即返回 RIICHI_ACTION_REQUIRED
-        // 需要根據手牌狀態自己生成可打牌的推薦
-
-        // 首先嘗試使用當前 mask
-        var mask = await bot.getMask()
-        let validCount = mask.filter { $0 == 1 }.count
-
-        botLog("[BundledCoreMLBot] recommendationsFromCurrentMask: mask has \(validCount) valid actions")
-
-        // 如果 mask 沒有有效動作，根據手牌生成可打牌 mask
-        if validCount == 0 {
-            botLog("[BundledCoreMLBot] Mask is empty after meld, generating from tehai")
-
-            // 根據手牌生成可打牌的 mask (使用 PlayerState.actionSpace)
-            mask = [UInt8](repeating: 0, count: PlayerState.actionSpace)
-
-            // 走訪手牌，標記可以打的牌
-            let (tehai, _) = mapper.hand()
-            for tile in tehai {
-                if let actionIndex = mapper.discardActionIndex(for: tile) {
-                    mask[actionIndex] = 1
-                }
-            }
-
-            let newValidCount = mask.filter { $0 == 1 }.count
-            botLog("[BundledCoreMLBot] Generated mask from tehai with \(newValidCount) valid actions")
-
-            if newValidCount == 0 {
-                botLog("[BundledCoreMLBot] Still no valid actions, tehai count: \(tehai.count)")
+        let probs: [Float]
+        let mask: [UInt8]
+        do {
+            guard try await bot.inferCurrentState() != nil else {
+                eventLog("[Bot] 副露後無合法動作可推論（大明槓後不需打牌），不送推薦")
                 return []
             }
-        }
-
-        // 對**當前狀態**重新推論。
-        //
-        // 這裡曾經是「拿 lastProbs，取不到就用均勻分布」。但副露之後 MJAI 不會再送
-        // 事件，react 沒被呼叫過，lastProbs 停在副露前那一次——手牌早就變了。
-        // 於是實際走的一律是均勻分布那條路，等於「拿 mask 裡第一個合法的牌」，
-        // 完全沒有模型參與。使用者的體感是「有時候不會丟最推薦的牌」，
-        // 真相是**那時候根本沒有推薦**。
-        //
-        // 側欄還把它顯示得跟真推薦一模一樣，看不出差別——正是 AUDIT §13
-        // 「不能運作又不說」要防的那類問題。
-        var probs: [Float] = []
-        do {
-            _ = try await bot.inferCurrentState()
             probs = await bot.getLastProbs()
             mask = await bot.getLastMask()
         } catch {
-            botLog("[BundledCoreMLBot] 副露後推論失敗: \(error)")
-        }
-
-        let currentValidCount = mask.filter { $0 == 1 }.count
-        let hasValidProbs = probs.contains(where: { $0 > 0 })
-
-        if !hasValidProbs {
-            // 推論真的失敗才退回均勻分布，而且要在 log 裡講清楚這不是模型的判斷
-            guard currentValidCount > 0 else {
-                return []
-            }
-            let uniformProb = Float(1.0) / Float(currentValidCount)
-            probs = [Float](repeating: 0, count: PlayerState.actionSpace)
-            for (index, isAvailable) in mask.enumerated() where isAvailable == 1 {
-                if index < probs.count { probs[index] = uniformProb }
-            }
-            eventLog("[Bot] ⚠️ 副露後推論失敗，退回均勻分布 (\(currentValidCount) 個動作)"
-                   + "——這批推薦不是模型的判斷")
+            eventLog("[Bot] ⚠️ 副露後推論失敗（\(error)），不送推薦")
+            return []
         }
 
         // 建立推薦列表

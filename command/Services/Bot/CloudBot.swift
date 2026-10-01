@@ -21,7 +21,8 @@
 //    不動斷路器——伺服器只可能回同一手（Akagi #227/#228）
 //  - null reaction＝事件流不同步：打本地決策並 warn，絕不默默 pass 掉真回合
 //  - 重連重放歷史事件期間抑制雲端呼叫（`suppressCloud(forNextEvents:)`）——
-//    歷史決策早就做完了，重放時打 API 是純浪費（N 個決策 × 2s 逾時預算＋額度）
+//    歷史決策早就做完了，重放時打 API 是純浪費（N 個決策 × 2s 逾時預算＋額度）。
+//    syncGame 重放走 live 路徑，靠 `serverAuthorization` 擋掉授權已被取代的過期決策點
 //
 
 import Foundation
@@ -44,12 +45,12 @@ final class CloudBot: MahjongBot {
     /// 每個決策點重讀一次設定（由 `NakiRuntime` 注入 `SettingsStore.cloudConfig`）
     private let configProvider: () -> CloudInferenceConfig?
 
-    /// 伺服器當下是否有待處理的授權（oplist）。
+    /// 這批 oplist 授權（`MJAIEventKey.oplistSequence`）是否仍是伺服器當下待處理的那一批。
     ///
-    /// 雲端-only 模式（三麻，`local == nil`）的決策點守門：事件帶了
-    /// oplistSequence 但授權已被消化（autopass 競態）時不再問雲端。
-    /// 預設 `{ true }`＝不過濾（測試／4p 用不到）。
-    private let serverAuthorization: () -> Bool
+    /// 兩個用途：三麻雲端-only 的決策點守門（授權已被消化，autopass 競態，不再問雲端）；
+    /// 以及 syncGame 重放歷史事件時，過期決策點（授權早被後續動作取代）不重問伺服器。
+    /// 預設 `{ _ in true }`＝不過濾（測試／Replay 用不到）。
+    private let serverAuthorization: (UInt64) -> Bool
 
     /// 供測試注入 `URLProtocol` stub；正式路徑 ephemeral（牌局資料不落磁碟 cache）
     private let clientConfiguration: URLSessionConfiguration
@@ -76,12 +77,17 @@ final class CloudBot: MahjongBot {
     /// 避免同一授權 pending 期間每個事件都觸發一次 API）
     private var lastConsultedOplistSequence: UInt64?
 
+    /// 不會是自家決策點的事件型別：它們可能與決策事件共用同一批 oplist seq
+    private static let nonDecisionTypes: Set<String> = [
+        "start_game", "start_kyoku", "reach", "reach_accepted", "dora", "end_kyoku", "end_game",
+    ]
+
     /// 雲端啟用期間連續以非雲端來源結束的決策數（fallback 可視化）
     private(set) var fallbackStreak = 0
 
     init(local: (any MahjongBot)?, playerId: UInt8, is3P: Bool,
          configProvider: @escaping () -> CloudInferenceConfig?,
-         serverAuthorization: @escaping () -> Bool = { true },
+         serverAuthorization: @escaping (UInt64) -> Bool = { _ in true },
          clientConfiguration: URLSessionConfiguration = .ephemeral) {
         self.local = local
         self.playerId = playerId
@@ -149,13 +155,18 @@ final class CloudBot: MahjongBot {
             return localReaction
         }
 
+        // 同一批事件共用同一個 seq（`[start_kyoku, tsumo]`、`[reach_accepted, tsumo]`），
+        // 非決策型別不消耗 seq，留給同批真正的決策事件。
+        let seq = events.filter { !Self.nonDecisionTypes.contains($0["type"] as? String ?? "") }
+            .compactMap { $0[MJAIEventKey.oplistSequence] as? UInt64 }.last
+
         guard local != nil else {
             // ── 雲端-only（三麻）：決策點由伺服器授權驅動 ──
             // 事件帶 oplistSequence ＝ 這個事件伴隨一批新授權抵達；
             // 每批恰問一次（同授權 pending 期間的後續事件不重複觸發）。
-            guard let seq = events.compactMap({ $0[MJAIEventKey.oplistSequence] as? UInt64 }).last,
+            guard let seq,
                   seq != lastConsultedOplistSequence,
-                  serverAuthorization() else {
+                  serverAuthorization(seq) else {
                 return nil
             }
             lastConsultedOplistSequence = seq
@@ -175,6 +186,9 @@ final class CloudBot: MahjongBot {
         // 強制手：答案完全確定，伺服器只可能回同一手。本地回答、不花額度；
         // 斷路器與 fallbackStreak 都不動——這不是 fallback（Akagi #227/#228）
         if localReaction.forced { return localReaction }
+
+        // 授權已被取代＝syncGame 重放的歷史決策，不重問伺服器（沒有 seq 的事件無從判斷，照問）
+        if let seq, !serverAuthorization(seq) { return localReaction }
 
         if let cloud = await cloudOverride() {
             fallbackStreak = 0
@@ -292,9 +306,10 @@ final class CloudBot: MahjongBot {
                 // 二連 429：這一手退回本地（D3 不變），但斷路器不開
                 guard !retriedAfterRateLimit else { return nil }
                 retriedAfterRateLimit = true
-                // Retry-After 解不出（缺席或 HTTP-date 格式）用 0.4s；
+                // Retry-After 解不出（缺席、HTTP-date、負數、NaN/Inf）用 0.4s；
                 // 上限 1s——決策逾時預算才 2s，等更久不如退回本地
-                let seconds = min(retryAfter.flatMap(Double.init) ?? 0.4, 1.0)
+                let seconds = retryAfter.flatMap(Double.init)
+                    .flatMap { $0.isFinite && $0 >= 0 ? min($0, 1.0) : nil } ?? 0.4
                 try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             } catch {
                 // 宣告那次成功、跟進失敗＝伺服器不穩：開斷路器，下個決策不再付一次逾時
