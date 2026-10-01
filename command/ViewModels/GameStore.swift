@@ -9,6 +9,13 @@ import Foundation
 import MortalSwift
 import SwiftUI
 
+/// 手動檢查更新的結果（設定頁顯示用）。
+enum UpdateCheckOutcome: Equatable, Sendable {
+    case upToDate
+    case available(String)
+    case failed
+}
+
 // MARK: - Game Store
 
 /// SwiftUI 側欄與 MCP／Debug 共同讀的那一份牌局狀態。
@@ -62,6 +69,15 @@ final class GameStore {
     /// 頁面載不起來時 Naki 什麼都做不了，而在此之前這件事只寫進 `statusMessage`
     /// ——那會被下一個事件蓋掉。使用者看到的是空白頁面與一句稍縱即逝的文字。
     var pageLoadFailure: String?
+
+    /// 有新版可下載；nil = 沒有（或已略過／關閉橫幅）。
+    ///
+    /// 檢查只在啟動時跑一次，結果若只寫進 `statusMessage` 會被下一個事件蓋掉，
+    /// 使用者等於沒收到提醒——所以像 `pageLoadFailure` 一樣常駐，直到使用者處理。
+    var availableUpdate: ReleaseInfo?
+
+    /// 最近一次手動檢查的結果，給設定頁顯示；自動檢查不寫。
+    var updateCheckResult: UpdateCheckOutcome?
 
     /// Bot 推論失敗的原因；nil = 正常（下一次成功的 bot 回應會清掉）。
     ///

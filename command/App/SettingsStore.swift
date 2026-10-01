@@ -142,6 +142,35 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - 更新提醒
+
+    nonisolated static let autoCheckUpdateKey = "naki.autoCheckUpdate"
+    nonisolated static let lastUpdateCheckKey = "naki.lastUpdateCheck"
+    nonisolated static let skippedUpdateVersionKey = "naki.skippedUpdateVersion"
+
+    /// 預設開：未設定過的 key 視為 true。
+    nonisolated static func loadAutoCheckUpdate(from defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: autoCheckUpdateKey) as? Bool ?? true
+    }
+
+    /// 啟動時自動檢查有沒有新版（只提示，不下載）。
+    var autoCheckUpdate: Bool = SettingsStore.loadAutoCheckUpdate() {
+        didSet {
+            guard autoCheckUpdate != oldValue else { return }
+            UserDefaults.standard.set(autoCheckUpdate, forKey: Self.autoCheckUpdateKey)
+        }
+    }
+
+    /// 上次成功取得回應的時間（離線失敗不算，才不會吃掉 24 小時視窗）。
+    var lastUpdateCheck: Date? = UserDefaults.standard.object(forKey: SettingsStore.lastUpdateCheckKey) as? Date {
+        didSet { UserDefaults.standard.set(lastUpdateCheck, forKey: Self.lastUpdateCheckKey) }
+    }
+
+    /// 使用者按「略過此版本」的版號；自動檢查遇到同一版不再提示。
+    var skippedUpdateVersion: String? = UserDefaults.standard.string(forKey: SettingsStore.skippedUpdateVersionKey) {
+        didSet { UserDefaults.standard.set(skippedUpdateVersion, forKey: Self.skippedUpdateVersionKey) }
+    }
+
     // MARK: - 已啟用的插件
 
     nonisolated static let enabledPluginIdsKey = "naki.plugins.enabledIds"

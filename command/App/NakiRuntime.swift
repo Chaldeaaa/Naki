@@ -478,6 +478,40 @@ final class NakiRuntime {
         return found
     }
 
+    /// 檢查 App 有沒有新版。自動檢查受開關與 24 小時節流約束；手動（設定頁、App 選單）一律執行並回報結果。
+    func checkForUpdate(manual: Bool) async {
+        guard manual || UpdateChecker.shouldAutoCheck(
+            enabled: settings.autoCheckUpdate, last: settings.lastUpdateCheck, now: Date())
+        else { systemLog("[Update] 略過自動檢查（關閉或 24 小時內已查）"); return }
+
+        let latest: ReleaseInfo?
+        do {
+            latest = try await UpdateChecker.fetchLatest()
+        } catch {
+            systemLog("[Update] 檢查失敗：\(error.localizedDescription)")
+            if manual {
+                store.updateCheckResult = .failed
+                store.statusMessage = L10n.text("檢查失敗")
+            }
+            return
+        }
+        settings.lastUpdateCheck = Date()
+        systemLog("[Update] 最新 \(latest?.version ?? "—")，目前 \(NakiAppVersion.short)")
+
+        guard let info = latest,
+              UpdateChecker.shouldSurface(info, local: NakiAppVersion.short,
+                                          skipped: settings.skippedUpdateVersion, manual: manual)
+        else {
+            if manual {
+                store.updateCheckResult = .upToDate
+                store.statusMessage = L10n.text("已是最新版本")
+            }
+            return
+        }
+        store.availableUpdate = info
+        if manual { store.updateCheckResult = .available(info.version) }
+    }
+
     /// 只有已啟用的插件才熱重載；未啟用時只存值。
     func setPluginSetting(id: String, key: String, value: Any) {
         settings.setPluginSettingValue(pluginId: id, key: key, value: value)
@@ -521,6 +555,7 @@ final class NakiRuntime {
             removePlugin: RemovePluginAction(runtime: self),
             installPlugins: InstallPluginsAction(runtime: self),
             checkPluginUpdates: CheckPluginUpdatesAction(runtime: self),
+            checkForUpdate: CheckForUpdateAction(runtime: self),
             setPluginSetting: SetPluginSettingAction(runtime: self),
             forceReconnect: ForceReconnectAction(session: session),
             setAutoPlayMode: SetAutoPlayModeAction(runtime: self),

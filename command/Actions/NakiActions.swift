@@ -1032,6 +1032,8 @@ struct NakiActions {
   var installPlugins: InstallPluginsAction
   /// 檢查插件更新
   var checkPluginUpdates: CheckPluginUpdatesAction
+  /// 檢查 App 有沒有新版（`manual` 略過節流與略過清單）
+  var checkForUpdate: CheckForUpdateAction
   /// 改插件設定值
   var setPluginSetting: SetPluginSettingAction
   /// 強制斷線重連以重建 Bot
@@ -1072,6 +1074,7 @@ struct NakiActions {
     self.removePlugin = RemovePluginAction()
     self.installPlugins = InstallPluginsAction()
     self.checkPluginUpdates = CheckPluginUpdatesAction()
+    self.checkForUpdate = CheckForUpdateAction()
     self.setPluginSetting = SetPluginSettingAction()
     self.forceReconnect = ForceReconnectAction()
     self.setAutoPlayMode = SetAutoPlayModeAction()
@@ -1095,6 +1098,7 @@ struct NakiActions {
        removePlugin: RemovePluginAction,
        installPlugins: InstallPluginsAction,
        checkPluginUpdates: CheckPluginUpdatesAction,
+       checkForUpdate: CheckForUpdateAction,
        setPluginSetting: SetPluginSettingAction,
        forceReconnect: ForceReconnectAction,
        setAutoPlayMode: SetAutoPlayModeAction,
@@ -1115,6 +1119,7 @@ struct NakiActions {
     self.removePlugin = removePlugin
     self.installPlugins = installPlugins
     self.checkPluginUpdates = checkPluginUpdates
+    self.checkForUpdate = checkForUpdate
     self.setPluginSetting = setPluginSetting
     self.forceReconnect = forceReconnect
     self.setAutoPlayMode = setAutoPlayMode
@@ -1264,6 +1269,28 @@ struct CheckPluginUpdatesAction {
   #endif
 
   func callAsFunction() async -> [PluginUpdate] { await perform() }
+}
+
+/// 檢查 App 本身有沒有新版（只提示，不下載）。
+struct CheckForUpdateAction {
+
+  private nonisolated(unsafe) let perform: (Bool) async -> Void
+
+  private init(perform: @escaping (Bool) async -> Void) {
+    self.perform = perform
+  }
+
+  init(runtime: NakiRuntime) {
+    self.init(perform: { [weak runtime] manual in await runtime?.checkForUpdate(manual: manual) })
+  }
+
+  nonisolated init() { self.perform = { _ in } }
+
+  #if DEBUG
+    init(stub: @escaping (Bool) async -> Void) { self.init(perform: stub) }
+  #endif
+
+  func callAsFunction(manual: Bool) async { await perform(manual) }
 }
 
 /// 存插件設定值；插件已啟用才熱重載（改設定不該順便把插件啟用並執行）。

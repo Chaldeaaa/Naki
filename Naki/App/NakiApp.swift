@@ -27,6 +27,11 @@ struct NakiApp: App {
         }
         // ⌘N 會開第二個 ContentView，把同一個 WebPage 綁到第二個 WebView（SIGTRAP）。
         // runtime 只有一份，視窗也只能有一個。
-        .commands { CommandGroup(replacing: .newItem) {} }
+        .commands {
+            CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .appInfo) {
+                Button("檢查更新…") { Task { await runtime.checkForUpdate(manual: true) } }
+            }
+        }
     }
 }

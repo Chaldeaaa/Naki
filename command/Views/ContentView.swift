@@ -235,15 +235,30 @@ struct ContentView: View {
         }
         // 必須在 ContentView 內、不能掛在 Scene 根：型別名會成為視窗 autosave key
         .appLocale()
+        // 選完區服、主視窗出現後再查；延遲是讓出啟動時的網路與主執行緒
+        .task(id: showsServerPicker) {
+            guard !showsServerPicker else { return }
+            guard (try? await Task.sleep(for: .seconds(5))) != nil else { return }
+            await naki.actions.checkForUpdate(manual: false)
+        }
     }
 
     // MARK: - macOS Layout
 #if os(macOS)
     private var macOSLayout: some View {
         HSplitView {
-            // WebView (由 WebSession 決定是 WebPage 還是 WKWebView)
-            AdaptiveNakiWebView()
-                .frame(minWidth: 600)
+            // 橫幅排在牌桌上方、只佔左欄：`HSplitView` 是 AppKit 的，不吃 `safeAreaInset`，
+            // 掛在它外面會浮在側欄標頭上（按鈕蓋住「待機」狀態點）。
+            VStack(spacing: 0) {
+                JSInjectionFailureBanner()
+                LiqiParseFailureBanner()
+                PageLoadFailureBanner()
+                UpdateAvailableBanner()
+                BotFailureBanner()
+                // WebView (由 WebSession 決定是 WebPage 還是 WKWebView)
+                AdaptiveNakiWebView()
+            }
+            .frame(minWidth: 600)
 
             // 決策面板（右側）
             if showGamePanel {
@@ -252,14 +267,6 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .top) {
-            VStack(spacing: 0) {
-                JSInjectionFailureBanner()
-                LiqiParseFailureBanner()
-                PageLoadFailureBanner()
-                BotFailureBanner()
-            }
-        }
         .safeAreaInset(edge: .bottom) {
             StatusBar()
         }
@@ -456,6 +463,9 @@ struct ContentView: View {
                     }
                     .safeAreaInset(edge: .top) {
                         LiqiParseFailureBanner()
+                    }
+                    .safeAreaInset(edge: .top) {
+                        UpdateAvailableBanner()
                     }
                     .safeAreaInset(edge: .top) {
                         BotFailureBanner()
@@ -852,6 +862,7 @@ struct AdvancedSettingsSheet: View {
     /// 「測試連線」的結果（只活在這張 sheet 裡；nil＝還沒測）
     @State private var cloudTestResult: String?
     @State private var cloudTestRunning = false
+    @State private var updateCheckRunning = false
     /// 測試連線取回的模型清單（供模型欄的下拉選擇；空＝還沒取到）
     @State private var cloudModels: [CloudModelInfo] = []
     /// `GET /v3/key` 的方案／到期／今日用量（nil＝還沒查到或查不到）
@@ -936,6 +947,20 @@ struct AdvancedSettingsSheet: View {
     private var keepAliveInBackground: Binding<Bool> {
         Binding(get: { naki.settings.keepAliveInBackground },
                 set: { naki.actions.setKeepAliveInBackground($0) })
+    }
+
+    private var autoCheckUpdate: Binding<Bool> {
+        Binding(get: { naki.settings.autoCheckUpdate },
+                set: { naki.settings.autoCheckUpdate = $0 })
+    }
+
+    @ViewBuilder private var updateCheckResultText: some View {
+        switch naki.store.updateCheckResult {
+        case .upToDate: Text("已是最新版本").font(.caption).foregroundStyle(.secondary)
+        case .available(let version): Text("有新版本 \(version)").font(.caption).foregroundStyle(.secondary)
+        case .failed: Text("檢查失敗").font(.caption).foregroundStyle(.secondary)
+        case nil: EmptyView()
+        }
     }
 
     /// 區服。setter 走 Action 而不是直接寫 settings——換服要整頁重載，
@@ -1328,6 +1353,30 @@ struct AdvancedSettingsSheet: View {
                 Label("畫面", systemImage: "eye.slash")
             }
 
+            // 更新
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("自動檢查更新", isOn: autoCheckUpdate)
+                        .accessibilityIdentifier("auto-check-update-toggle")
+
+                    HStack {
+                        Text("目前版本 \(NakiAppVersion.short)")
+                        Button(updateCheckRunning ? "檢查中…" : "立即檢查") {
+                            Task {
+                                updateCheckRunning = true
+                                await naki.actions.checkForUpdate(manual: true)
+                                updateCheckRunning = false
+                            }
+                        }
+                        .disabled(updateCheckRunning)
+                        .accessibilityIdentifier("check-update-button")
+                        updateCheckResultText
+                    }
+                }
+            } label: {
+                Label("更新", systemImage: "arrow.down.circle")
+            }
+
             // Bot 管理
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
@@ -1599,6 +1648,43 @@ struct PageLoadFailureBanner: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.orange.opacity(0.15))
             .accessibilityIdentifier("page-load-failure-banner")
+        }
+    }
+}
+
+/// 有新版時的橫幅：只導向 release 頁，不下載、不安裝。
+struct UpdateAvailableBanner: View {
+
+    @Environment(\.naki) private var naki
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        if let update = naki.store.availableUpdate {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.down.circle")
+                    .imageScale(.large)
+                Text("有新版本 \(update.version)")
+                    .fontWeight(.semibold)
+
+                Spacer(minLength: 8)
+
+                Button("前往下載") { openURL(update.url) }
+                    .buttonStyle(.borderedProminent)
+                Button("略過此版本") {
+                    naki.settings.skippedUpdateVersion = update.version
+                    naki.store.availableUpdate = nil
+                }
+                .buttonStyle(.bordered)
+                Button { naki.store.availableUpdate = nil } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("關閉提示")
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.blue.opacity(0.15))
+            .accessibilityIdentifier("update-available-banner")
         }
     }
 }
