@@ -60,23 +60,6 @@ struct ContentView: View {
         AutoPlayAvailability.modes(autoPlaySupported: naki.settings.supportsAutoPlay)
     }
 
-    /// iOS 側欄的 segmented control 寬度（依實際標籤字數算，不寫死點數）。
-    private var autoPlayPickerWidth: CGFloat {
-        availableAutoPlayModes.reduce(0) { total, mode in
-            total + CGFloat(mode.pickerLabel.count) * 15 + 26
-        }
-    }
-
-    /// macOS toolbar 的下拉選單寬度。
-    ///
-    /// 四個模式在 segmented control 上排不好看：SwiftUI 會**等寬分配**，而標籤是
-    /// 1/2/2/3 字，「關」那格被撐得很空、「全自動」剛好塞滿（2026-08-09 實測截圖）。
-    /// 下拉選單只顯示目前選中的那一個，寬度看最長的標籤就夠。
-    private var autoPlayMenuWidth: CGFloat {
-        let longest = availableAutoPlayModes.map(\.pickerLabel.count).max() ?? 2
-        return CGFloat(longest) * 15 + 52   // 文字 ＋ 箭頭 ＋ 左右 padding
-    }
-
     /// 模式 picker 本體：**刻意放在 `#if` 之外**，兩個平台的 toolbar 共用同一份。
     ///
     /// 這條路徑的選項與行為只有 iOS 17–25 會走到，而本機（macOS 26）連編譯都碰不到
@@ -91,7 +74,7 @@ struct ContentView: View {
             // 「自動」不是灰掉的按鈕而是根本不存在——灰掉的控制照樣要解釋，
             // 而解釋放在進階設定裡（`autoPlayAvailabilityBox`）。
             ForEach(availableAutoPlayModes, id: \.self) { mode in
-                Text(mode.pickerLabel).tag(mode)
+                Text(mode.pickerLabelKey).tag(mode)
             }
         }
         // 兩種樣式共用底下所有 modifier（onChange／sheet／a11y），
@@ -118,28 +101,18 @@ struct ContentView: View {
                     naki.actions.startFullAutoNow()
                 },
                 onCancel: { showFullAutoKindChoice = false })
+            .appLocale()
         }
         .accessibilityIdentifier("autoplay-mode-picker")
         .accessibilityLabel("自動打牌模式")
         .accessibilityHint(naki.settings.supportsAutoPlay
-                           ? "" : AutoPlayAvailability.autoUnavailableReason)
+                           ? "" : AutoPlayAvailability.autoUnavailableReasonKey)
     }
 
     /// 套用全自動的兩個選擇。兩個設定一起寫，避免只改一半就開始排隊。
     private func applyFullAutoChoice(sanma: Bool, room: RoomPreference) {
         naki.settings.fullAutoPrefersSanma = sanma
         naki.settings.fullAutoRoomPreference = room
-    }
-
-    /// 選人數時要先講清楚的兩件事：續局用的是哪個入口、三麻需要雲端。
-    private var fullAutoKindMessage: String {
-        var lines = ["對局結束後會自動排下一場，直到你切走模式。"]
-        if !naki.settings.cloudConfig.isActive {
-            // 三麻是雲端-only（bundled 模型的 obs 對三麻結構性無效，見 CLAUDE.md）
-            lines.append("⚠️ 雲端推論未啟用，選三麻會排不進去（排了也不會出手）。")
-        }
-        lines.append("只會排你自己點過、而且已經打過一場的場次；沒有的話會停下來並在紀錄裡說明。")
-        return lines.joined(separator: "\n")
     }
 
     /// 自動打牌基準延遲 stepper：`[ 1.0s ⌃⌄ ]`。
@@ -172,7 +145,7 @@ struct ContentView: View {
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("autoplay-delay-stepper")
         .accessibilityLabel("自動打牌基準延遲")
-        .accessibilityValue(String(format: "%.1f 秒", naki.settings.actionDelaySeconds))
+        .accessibilityValue(Text("\(naki.settings.actionDelaySeconds, format: .number.precision(.fractionLength(1))) 秒"))
 #if os(macOS)
         // `.help` 只包 macOS：iOS 上 tooltip 只在有指標裝置時看得到，對 iPhone 是
         // 多餘的 pointer 互動註冊。專案既有慣例就是這樣（見 `LogPanel` 的兩個 `.help`）。
@@ -202,7 +175,7 @@ struct ContentView: View {
     }
 
     /// 缺哪些條件才算生效（與設定頁的 `cloudEffectiveStateRow` 讀同一份判定）
-    private var cloudMissing: [String] { naki.settings.cloudConfig.missingRequirements }
+    private var cloudMissing: [LocalizedStringKey] { naki.settings.cloudConfig.missingRequirementKeys }
 
     private var cloudIconName: String {
         if cloudMissing.isEmpty { return "icloud.fill" }
@@ -215,12 +188,12 @@ struct ContentView: View {
         return naki.settings.cloudInferenceEnabled ? .orange : .secondary
     }
 
-    private var cloudToggleHelp: String {
-        if cloudMissing.isEmpty { return "雲端推論已生效——點一下切回本地模型" }
+    private var cloudToggleHelp: Text {
+        if cloudMissing.isEmpty { return Text("雲端推論已生效——點一下切回本地模型") }
         if naki.settings.cloudInferenceEnabled {
-            return "雲端推論尚未生效，還缺：" + cloudMissing.joined(separator: "、")
+            return Text("雲端推論尚未生效，還缺：\(missingList(cloudMissing))")
         }
-        return "雲端推論已關閉，目前使用內建本地模型"
+        return Text("雲端推論已關閉，目前使用內建本地模型")
     }
 
     /// 啟動時要不要問區服。
@@ -260,6 +233,8 @@ struct ContentView: View {
 #endif
             }
         }
+        // 必須在 ContentView 內、不能掛在 Scene 根：型別名會成為視窗 autosave key
+        .appLocale()
     }
 
     // MARK: - macOS Layout
@@ -290,10 +265,10 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: showGamePanel)
         .sheet(isPresented: $showAdvancedSettings) {
-            AdvancedSettingsSheet()
+            AdvancedSettingsSheet().appLocale()
         }
         .sheet(isPresented: $showPlugins) {
-            PluginsPageView()
+            PluginsPageView().appLocale()
         }
         .toolbar {
             macOSToolbarContent
@@ -329,7 +304,8 @@ struct ContentView: View {
 
         // 左側：自動打牌模式
         ToolbarItem(placement: .navigation) {
-            autoPlayModePicker(width: autoPlayMenuWidth, menu: true)
+            autoPlayModePicker(width: nil, menu: true)
+                .fixedSize()
                 .help(naki.settings.supportsAutoPlay
                       ? "AI 推薦模式"
                       : "AI 推薦模式（此裝置不提供自動送出）")
@@ -368,7 +344,7 @@ struct ContentView: View {
             .accessibilityIdentifier("mcp-server-toggle")
             .accessibilityLabel("MCP Server")
             .accessibilityValue(naki.store.isDebugServerRunning
-                                ? "運行中，連接埠 \(naki.store.debugServerPort)" : "未運行")
+                                ? "運行中，連接埠 \(Int(naki.store.debugServerPort))" : "未運行")
         }
 
         // 連接狀態
@@ -554,13 +530,13 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showLog) {
-            iOSLogSheet
+            iOSLogSheet.appLocale()
         }
         .sheet(isPresented: $showAdvancedSettings) {
-            AdvancedSettingsSheet()
+            AdvancedSettingsSheet().appLocale()
         }
         .sheet(isPresented: $showPlugins) {
-            PluginsPageView()
+            PluginsPageView().appLocale()
         }
     }
 
@@ -803,7 +779,7 @@ struct ServerPickerView: View {
                     .imageScale(.large)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("\(server.displayName)・\(server.regionName)")
+                    Text("\(Text(server.displayNameKey))・\(Text(server.regionNameKey))")
                         .fontWeight(isOn ? .semibold : .regular)
                     // 網域是「我要連去哪」的唯一憑據——國服與國際服的招牌長得不像，
                     // 但網址是使用者真正認得的東西
@@ -828,8 +804,15 @@ struct ServerPickerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("server-option-\(server.rawValue)")
-        .accessibilityLabel("\(server.displayName) \(server.regionName)")
+        .accessibilityLabel(Text("\(Text(server.displayNameKey)) \(Text(server.regionNameKey))"))
         .accessibilityValue(isOn ? "已選擇" : "未選擇")
+    }
+}
+
+/// 缺項逐項本地化後以本地化分隔符串起來（`Text` 插值 `Text`）。
+private func missingList(_ items: [LocalizedStringKey]) -> Text {
+    items.enumerated().reduce(Text(verbatim: "")) { acc, item in
+        item.offset == 0 ? Text(item.element) : Text("\(acc)\(Text("、"))\(Text(item.element))")
     }
 }
 
@@ -941,6 +924,14 @@ struct AdvancedSettingsSheet: View {
                 set: { naki.settings.showStatusBar = $0 })
     }
 
+#if os(macOS)
+    /// 語言。setter 走 Action，與其他會影響執行期行為的設定同一條路。
+    private var appLanguage: Binding<AppLanguage> {
+        Binding(get: { naki.settings.appLanguage },
+                set: { naki.actions.setAppLanguage($0) })
+    }
+#endif
+
     /// 背景保活。setter 走 Action：要即時推給已載入的頁面。
     private var keepAliveInBackground: Binding<Bool> {
         Binding(get: { naki.settings.keepAliveInBackground },
@@ -989,7 +980,7 @@ struct AdvancedSettingsSheet: View {
     /// 清單），而自架伺服器可能根本沒有這個端點——純下拉在這兩種情境會把
     /// 使用者卡死。所以自由輸入永遠可用，「測試連線」成功後箭頭選單才亮起。
     @ViewBuilder
-    private func cloudModelRow(placeholder: String, text: Binding<String>,
+    private func cloudModelRow(placeholder: LocalizedStringKey, text: Binding<String>,
                                game: String, accessibilityId: String) -> some View {
         HStack {
             TextField(placeholder, text: text)
@@ -1023,7 +1014,7 @@ struct AdvancedSettingsSheet: View {
     /// 排在 key 欄位上方，捲下來填完就不會再往上看。
     @ViewBuilder
     private var cloudEffectiveStateRow: some View {
-        let missing = naki.settings.cloudConfig.missingRequirements
+        let missing = naki.settings.cloudConfig.missingRequirementKeys
 
         if missing.isEmpty {
             Label("雲端推論已生效——對局中會以雲端決策為準", systemImage: "checkmark.circle.fill")
@@ -1031,8 +1022,7 @@ struct AdvancedSettingsSheet: View {
                 .foregroundColor(.green)
                 .accessibilityIdentifier("cloud-effective-state")
         } else {
-            Label("雲端推論尚未生效，仍在用內建本地模型。還缺："
-                  + missing.joined(separator: "、"),
+            Label("雲端推論尚未生效，仍在用內建本地模型。還缺：\(missingList(missing))",
                   systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundColor(.orange)
@@ -1067,7 +1057,7 @@ struct AdvancedSettingsSheet: View {
 
         guard let client = AkagiApiClient(baseURL: naki.settings.cloudServerURL, key: key) else {
             cloudKeyStatus = nil
-            cloudProbeError = "伺服器 URL 無法解析"
+            cloudProbeError = L10n.text("伺服器 URL 無法解析")
             return
         }
         cloudProbing = true
@@ -1108,29 +1098,29 @@ struct AdvancedSettingsSheet: View {
                 }
 
                 if let s = cloudKeyStatus {
-                    keyRow("方案", s.plan.isEmpty ? "—" : s.plan)
+                    keyRow("方案", Text(verbatim: s.plan.isEmpty ? "—" : s.plan))
                     if !s.expiresAtRaw.isEmpty {
-                        keyRow("到期時間", formattedExpiry(s))
+                        keyRow("到期時間", Text(verbatim: formattedExpiry(s)))
                         if let days = s.daysRemaining {
-                            keyRow("剩餘", s.isExpired ? "已過期" : "\(days) 天",
+                            keyRow("剩餘", s.isExpired ? Text("已過期") : Text("\(days) 天"),
                                    tint: s.isExpired ? .red : (days <= 3 ? .orange : nil))
                         }
                     }
                     if s.rpd > 0 {
-                        keyRow("今日用量", "\(s.usageToday) / \(s.rpd)")
+                        keyRow("今日用量", Text(verbatim: "\(s.usageToday) / \(s.rpd)"))
                         if let f = s.usageFraction {
                             ProgressView(value: f)
                                 .progressViewStyle(.linear)
                                 .tint(f > 0.9 ? .red : (f > 0.7 ? .orange : .accentColor))
                         }
                     } else if s.usageToday > 0 {
-                        keyRow("今日用量", "\(s.usageToday)")
+                        keyRow("今日用量", Text(verbatim: "\(s.usageToday)"))
                     }
                     if s.rpm > 0 || s.topK > 0 {
                         keyRow("限額",
-                               [s.rpm > 0 ? String(format: "%.0f 次/分", s.rpm) : nil,
-                                s.topK > 0 ? "top-\(s.topK)" : nil]
-                                .compactMap { $0 }.joined(separator: "・"))
+                               Text(verbatim: [s.rpm > 0 ? L10n.text("\(Int(s.rpm.rounded())) 次/分") : nil,
+                                               s.topK > 0 ? "top-\(s.topK)" : nil]
+                                .compactMap { $0 }.joined(separator: "・")))
                     }
                 } else if let err = cloudProbeError {
                     // 查不到就說查不到。留白會讓人以為「這個方案沒有額度資訊」，
@@ -1153,11 +1143,11 @@ struct AdvancedSettingsSheet: View {
         }
     }
 
-    private func keyRow(_ label: String, _ value: String, tint: Color? = nil) -> some View {
+    private func keyRow(_ label: LocalizedStringKey, _ value: Text, tint: Color? = nil) -> some View {
         HStack {
             Text(label).font(.caption2).foregroundColor(.secondary)
             Spacer(minLength: 8)
-            Text(value)
+            value
                 .font(.system(.caption, design: .monospaced))
                 .fontWeight(.medium)
                 .foregroundColor(tint)
@@ -1183,11 +1173,11 @@ struct AdvancedSettingsSheet: View {
             do {
                 let health = try await AkagiApiClient.health(baseURL: baseURL)
                 guard !key.trimmingCharacters(in: .whitespaces).isEmpty else {
-                    cloudTestResult = "伺服器 \(health.status)（未填 key，略過模型查詢）"
+                    cloudTestResult = L10n.text("伺服器 \(health.status)（未填 key，略過模型查詢）")
                     return
                 }
                 guard let client = AkagiApiClient(baseURL: baseURL, key: key) else {
-                    cloudTestResult = "URL 無法解析"
+                    cloudTestResult = L10n.text("URL 無法解析")
                     return
                 }
                 let models = try await client.models()
@@ -1196,15 +1186,16 @@ struct AdvancedSettingsSheet: View {
                 // 會以為那張卡片壞了。失敗不影響這次測試的結論（模型清單已經拿到）。
                 cloudKeyStatus = try? await client.keyStatus()
                 let ids = models.map { "\($0.id)(\($0.game))" }.joined(separator: ", ")
-                let base = "伺服器 \(health.status)；可用模型：\(ids.isEmpty ? "無" : ids)"
+                let modelList = ids.isEmpty ? L10n.text("無") : ids
+                let base = L10n.text("伺服器 \(health.status)；可用模型：\(modelList)")
                 // 「連得上」不等於「有在用」。不附這一句的話，開關沒開時這則成功訊息
                 // 反而會強化「已經配置好了」的錯覺——這是本來就要修的那個問題的幫兇。
                 cloudTestResult = naki.settings.cloudInferenceEnabled
                     ? base
-                    : base + "（但開關未開，對局仍走本地模型）"
-                    + (models.isEmpty ? "" : "——可用模型欄旁的箭頭直接選")
+                    : base + L10n.text("（但開關未開，對局仍走本地模型）")
+                    + (models.isEmpty ? "" : L10n.text("——可用模型欄旁的箭頭直接選"))
             } catch {
-                cloudTestResult = "失敗：\(error.localizedDescription)"
+                cloudTestResult = L10n.text("失敗：\(error.localizedDescription)")
             }
         }
     }
@@ -1252,7 +1243,7 @@ struct AdvancedSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Picker("伺服器", selection: majsoulServer) {
                         ForEach(MajsoulServer.allCases) { server in
-                            Text("\(server.displayName)・\(server.regionName)").tag(server)
+                            Text("\(Text(server.displayNameKey))・\(Text(server.regionNameKey))").tag(server)
                         }
                     }
                     .accessibilityIdentifier("majsoul-server-picker")
@@ -1274,7 +1265,7 @@ struct AdvancedSettingsSheet: View {
                     // 這行是「取消固定」的說明：關掉開關就會恢復每次啟動詢問。
                     // 沒有這句的話，勾過「以後都用這個」的人不會知道怎麼把它要回來。
                     Text(naki.settings.pinMajsoulServer
-                         ? "已固定為 \(naki.settings.majsoulServer.regionName)，啟動時直接進入。關掉這個開關就會恢復每次詢問。"
+                         ? "已固定為 \(Text(naki.settings.majsoulServer.regionNameKey))，啟動時直接進入。關掉這個開關就會恢復每次詢問。"
                          : "每次啟動都會問要連哪個伺服器，上次選的會預先選起來。")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -1283,6 +1274,24 @@ struct AdvancedSettingsSheet: View {
             } label: {
                 Label("雀魂伺服器", systemImage: "globe.asia.australia")
             }
+
+            #if os(macOS)
+            // 語言
+            GroupBox {
+                Picker("語言", selection: appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        if let name = language.nativeName {
+                            Text(verbatim: name).tag(language)
+                        } else {
+                            Text("跟隨系統").tag(language)
+                        }
+                    }
+                }
+                .accessibilityIdentifier("app-language-picker")
+            } label: {
+                Label("語言", systemImage: "character.bubble")
+            }
+            #endif
 
             // 畫面
             GroupBox {
@@ -1405,7 +1414,7 @@ struct AdvancedSettingsSheet: View {
                     Toggle("啟用雲端推論", isOn: cloudEnabled)
                         .accessibilityIdentifier("cloud-inference-toggle")
 
-                    Text("啟用後，每個決策點會把**本局至今的對局事件（含自家手牌）**上傳到下方伺服器換取決策；伺服器失敗時自動退回內建本地模型，對局不會停擺。API key 存在 Keychain，不會出現在 log 或設定檔。")
+                    Text("啟用後，每個決策點會把**本局至今的對局事件**（含自家手牌）上傳到下方伺服器換取決策；伺服器失敗時自動退回內建本地模型，對局不會停擺。API key 存在 Keychain，不會出現在 log 或設定檔。")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
@@ -1496,7 +1505,7 @@ struct AdvancedSettingsSheet: View {
                     HStack {
                         Text("基準延遲")
                         Spacer()
-                        Text(String(format: "%.1f 秒", naki.settings.actionDelaySeconds))
+                        Text("\(naki.settings.actionDelaySeconds, format: .number.precision(.fractionLength(1))) 秒")
                             .font(.system(.body, design: .monospaced))
                             .monospacedDigit()
                         Stepper("基準延遲",
@@ -1530,7 +1539,7 @@ struct AdvancedSettingsSheet: View {
                     Text("自動送出：不可用")
                         .font(.callout)
                         .fontWeight(.semibold)
-                    Text(AutoPlayAvailability.autoUnavailableReason)
+                    Text(AutoPlayAvailability.autoUnavailableReasonKey)
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1544,7 +1553,7 @@ struct AdvancedSettingsSheet: View {
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("autoplay-unavailable-note")
             .accessibilityLabel("自動送出不可用")
-            .accessibilityValue(AutoPlayAvailability.autoUnavailableReason)
+            .accessibilityValue(AutoPlayAvailability.autoUnavailableReasonKey)
         }
     }
 }
@@ -1734,23 +1743,20 @@ struct StatusBar: View {
         }
     }
 
-    private var statusIcon: String {
-        if message.contains("錯誤") || message.contains("Error") {
-            return "exclamationmark.triangle.fill"
-        } else if message.contains("成功") || message.contains("已") {
-            return "checkmark.circle.fill"
-        }
-        return "info.circle.fill"
+    /// `statusMessage` 不帶類型，不能靠文字猜（翻成別的語言就失效）；
+    /// 以常駐橫幅所讀的四個故障來源判斷。
+    private var hasFault: Bool {
+        naki.store.botFailure != nil
+            || naki.store.pageLoadFailure != nil
+            || JSInjectionState.shared.report.failureSummary != nil
+            || LiqiParseFaultState.shared.bannerSummary != nil
     }
 
-    private var statusColor: Color {
-        if message.contains("錯誤") || message.contains("Error") {
-            return .red
-        } else if message.contains("成功") || message.contains("已") {
-            return .green
-        }
-        return .blue
+    private var statusIcon: String {
+        hasFault ? "exclamationmark.triangle.fill" : "info.circle.fill"
     }
+
+    private var statusColor: Color { hasFault ? .red : .blue }
 }
 
 // MARK: - 模式 picker 樣式
@@ -1769,6 +1775,16 @@ private struct ModePickerStyle: ViewModifier {
             content.pickerStyle(.menu)
         } else {
             content.pickerStyle(.segmented)
+        }
+    }
+}
+
+private extension RoomPreference {
+    /// 兩字加「房」整句翻譯，不拼接 `label`（語序因語言而異）。
+    var title: LocalizedStringKey {
+        switch self {
+        case .lowest: return "最低房"
+        case .highest: return "最高房"
         }
     }
 }
@@ -1808,13 +1824,15 @@ private struct FullAutoSetupSheet: View {
 
             Picker("房間", selection: $room) {
                 ForEach(RoomPreference.allCases, id: \.self) { pref in
-                    Text("\(pref.label)房").tag(pref)
+                    Text(pref.title).tag(pref)
                 }
             }
             .pickerStyle(.segmented)
 
-            Text("依帳號段位挑一間打得了的房：「最低」對手最弱、掉段風險最小；"
-                 + "「最高」點數效率高但打不好會掉段。")
+            Text("""
+                依帳號段位挑一間打得了的房：「最低」對手最弱、掉段風險最小；\
+                「最高」點數效率高但打不好會掉段。
+                """)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -1878,7 +1896,7 @@ struct PluginsPageView: View {
 
     // 移除插件的確認
     @State private var pendingRemoval: String?
-    @State private var diagnosticsText = "尚未檢查目前遊戲頁面"
+    @State private var diagnosticsText = L10n.text("尚未檢查目前遊戲頁面")
     @State private var checkingDiagnostics = false
     @State private var tab: PluginTab = .plugins
     @State private var selectedPluginId: String?   // master-detail 選中的插件
@@ -1889,6 +1907,7 @@ struct PluginsPageView: View {
         case log = "Log"
         case trust = "信任"
         var id: String { rawValue }
+        var title: LocalizedStringKey { LocalizedStringKey(rawValue) }
         var icon: String {
             switch self {
             case .plugins: return "puzzlepiece.extension"
@@ -1941,7 +1960,7 @@ struct PluginsPageView: View {
     }
 
     // 移除確認對話（抽成可重用的片段，兩個平台共用）
-    private var removeDialogTitle: String { "移除插件？" }
+    private var removeDialogTitle: LocalizedStringKey { "移除插件？" }
     private var removeDialogBinding: Binding<Bool> {
         Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } })
     }
@@ -1979,7 +1998,7 @@ struct PluginsPageView: View {
     private var tabPicker: some View {
         Picker("分頁", selection: $tab) {
             ForEach(PluginTab.allCases) { t in
-                Label(t.rawValue, systemImage: t.icon).tag(t)
+                Label(t.title, systemImage: t.icon).tag(t)
             }
         }
         .pickerStyle(.segmented)
@@ -2179,7 +2198,7 @@ struct PluginsPageView: View {
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 Text(d.id).font(.title3).bold()
-                Text(d.failure?.text ?? "無效插件")
+                (d.failure.map { Text(verbatim: $0.text) } ?? Text("無效插件"))
                     .foregroundColor(.red)
                     .fixedSize(horizontal: false, vertical: true)
                 Button(role: .destructive) { pendingRemoval = d.id } label: {
@@ -2327,7 +2346,7 @@ struct PluginsPageView: View {
         importPreview = []
         selectedImports = []
         importURL = ""
-        importMessage = "已引入 \(chosen.count - failures.count)/\(chosen.count) 個插件。在上面清單啟用（熱插拔，免重載）。"
+        importMessage = L10n.text("已引入 \(chosen.count - failures.count)/\(chosen.count) 個插件。在上面清單啟用（熱插拔，免重載）。")
         importError = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
 
@@ -2336,7 +2355,7 @@ struct PluginsPageView: View {
         updateChecking = true; importError = nil; importMessage = nil; pendingUpdates = []
         pendingUpdates = await naki.actions.checkPluginUpdates()
         updateChecking = false
-        if pendingUpdates.isEmpty { importMessage = "檢查了 \(naki.pluginDescriptors.count) 個，沒有更新。" }
+        if pendingUpdates.isEmpty { importMessage = L10n.text("檢查了 \(naki.pluginDescriptors.count) 個，沒有更新。") }
     }
 
     /// 第二段：使用者確認後才安裝（已啟用的會熱重載）。
@@ -2344,7 +2363,7 @@ struct PluginsPageView: View {
         let updates = pendingUpdates
         let failures = naki.actions.installPlugins(updates.map(\.fresh))
         pendingUpdates = []
-        importMessage = "更新了 \(updates.count - failures.count)/\(updates.count) 個插件（已啟用的會熱重載）。"
+        importMessage = L10n.text("更新了 \(updates.count - failures.count)/\(updates.count) 個插件（已啟用的會熱重載）。")
         importError = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
 
@@ -2463,7 +2482,7 @@ struct PluginsPageView: View {
                             return JSON.stringify(window.__nakiPlugins?.diagnostics?.()
                               || {error: '插件診斷尚未載入，請確認 App 版本及遊戲頁面'}, null, 2);
                             """)
-                            diagnosticsText = result as? String ?? "頁面沒有回傳診斷資料"
+                            diagnosticsText = result as? String ?? L10n.text("頁面沒有回傳診斷資料")
                         } catch { diagnosticsText = error.localizedDescription }
                     }
                 }
@@ -2486,7 +2505,7 @@ struct PluginsPageView: View {
                             return JSON.stringify(window.__nakiPlugins?.diagnostics?.()
                               || {error: '插件診斷尚未載入，請確認 App 版本及遊戲頁面'}, null, 2);
                             """)
-                            diagnosticsText = result as? String ?? "頁面沒有回傳診斷資料"
+                            diagnosticsText = result as? String ?? L10n.text("頁面沒有回傳診斷資料")
                         } catch { diagnosticsText = error.localizedDescription }
                     }
                 }
