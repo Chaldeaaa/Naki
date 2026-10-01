@@ -12,6 +12,113 @@
     window.__nakiCoreLoaded = true;
 
     // ========================================
+    // 背景保活：頁面隱藏時讓 Unity 主迴圈繼續轉
+    // ========================================
+    //
+    // 視窗被蓋住／App 隱藏時 WebKit 會停掉 rAF 並節流計時器，Unity 主迴圈靠 rAF，
+    // 於是整個凍結、不送心跳，久了連線過期。這裡包住 rAF，隱藏時改由 setTimeout
+    // 驅動（會被節流到幾 Hz，剛好夠處理網路訊息與心跳）。必須在 document start
+    // 裝好，早於 Unity loader 取得 rAF。只在 top frame 生效（bundled JS 每個 frame 都跑）。
+    (function () {
+        if (window !== window.top) return;
+        var hiddenGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
+        var stateGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+        if (!hiddenGetter || !stateGetter || typeof window.requestAnimationFrame !== 'function') return;
+
+        var PUMP_MS = 100;
+        var nativeRaf = window.requestAnimationFrame.bind(window);
+        var setTimer = window.setTimeout.bind(window);
+        var clearTimer = window.clearTimeout.bind(window);
+        var queue = new Map();
+        var running = null;
+        var nextId = 1;
+        var nativePending = false;
+        var pumpTimer = null;
+        var flushCount = 0;
+        var enabled = true;
+
+        function reallyHidden() { return stateGetter.get.call(document) === 'hidden'; }
+
+        function flush(ts) {
+            if (queue.size === 0) return;
+            var batch = running = queue;
+            queue = new Map();
+            flushCount++;
+            batch.forEach(function (cb) {
+                // 例外交給 window.onerror（Unity 靠它跳錯誤對話），且不中斷同批其他 callback
+                try { cb(ts); } catch (e) { setTimer(function () { throw e; }, 0); }
+            });
+            running = null;
+        }
+
+        function nativeFlush(ts) {
+            nativePending = false;
+            flush(ts);
+        }
+
+        function syncPump() {
+            var want = enabled && reallyHidden() && queue.size > 0;
+            if (!want && pumpTimer !== null) {
+                clearTimer(pumpTimer);
+                pumpTimer = null;
+            } else if (want && pumpTimer === null) {
+                pumpTimer = setTimer(function () {
+                    pumpTimer = null;
+                    flush(performance.now());
+                    syncPump();
+                }, PUMP_MS);
+            }
+        }
+
+        window.requestAnimationFrame = function (cb) {
+            var id = nextId++;
+            queue.set(id, cb);
+            if (!nativePending) {
+                nativePending = true;
+                nativeRaf(nativeFlush);
+            }
+            syncPump();
+            return id;
+        };
+
+        window.cancelAnimationFrame = function (id) {
+            queue.delete(id);
+            if (running) running.delete(id);   // 同批尚未執行的也要取消
+        };
+
+        // 頁面腳本（含 Unity）看到的可見性：開啟時一律「可見」，避免它自行暫停
+        Object.defineProperty(document, 'hidden', {
+            configurable: true,
+            get: function () { return enabled ? false : hiddenGetter.get.call(document); }
+        });
+        Object.defineProperty(document, 'visibilityState', {
+            configurable: true,
+            get: function () { return enabled ? 'visible' : stateGetter.get.call(document); }
+        });
+
+        // 必須最先註冊：先處理內部狀態，再擋掉事件不讓頁面的 listener 收到
+        document.addEventListener('visibilitychange', function (e) {
+            syncPump();
+            if (enabled) e.stopImmediatePropagation();
+        }, true);
+
+        window.__nakiKeepAlive = {
+            set: function (value) { enabled = !!value; syncPump(); },
+            // Swift 定時呼叫：WebContent 被系統暫停時頁內計時器不會跑，只有 callJavaScript 喚得醒它。
+            // 回傳是否隱藏，讓 Swift 決定要不要維持高頻。
+            tick: function () {
+                var hidden = reallyHidden();
+                if (enabled && hidden) { flush(performance.now()); syncPump(); }
+                return hidden;
+            },
+            state: function () {
+                return { enabled: enabled, reallyHidden: reallyHidden(),
+                         pumping: pumpTimer !== null, flushCount: flushCount };
+            }
+        };
+    })();
+
+    // ========================================
     // Base64 編碼/解碼
     // ========================================
 

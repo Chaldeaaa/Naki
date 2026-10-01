@@ -27,6 +27,7 @@ nonisolated enum PluginImportError: Error, Sendable {
     case crossOrigin(String)
     case tooLarge(String)
     case invalidManifest(String)
+    case installFailed(String)
 
     var text: String {
         switch self {
@@ -38,6 +39,7 @@ nonisolated enum PluginImportError: Error, Sendable {
         case .crossOrigin(let d): return "引用檔案跨來源（不允許）：\(d)"
         case .tooLarge(let d): return "超過尺寸上限：\(d)"
         case .invalidManifest(let d): return "manifest 無效：\(d)"
+        case .installFailed(let d): return "安裝失敗：\(d)"
         }
     }
 }
@@ -71,10 +73,10 @@ nonisolated enum PluginImportSource {
     /// 抓取並正規化（fetch-once）。不落地——落地是 `install`。
     static func fetch(urlString: String) async -> Result<ImportedPlugin, PluginImportError> {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed), let host = url.host else {
+        guard let url = URL(string: trimmed), let host = url.host?.lowercased() else {
             return .failure(.badURL)
         }
-        if host.contains("gist.github.com") {
+        if host == "gist.github.com" {
             return await fetchGist(url)
         }
         return await fetchHTTP(url)
@@ -156,13 +158,14 @@ nonisolated enum PluginImportSource {
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         // 允許裸 owner/repo（無 scheme）
         let normalized = normalizeInput(trimmed)
-        guard let url = URL(string: normalized), let host = url.host else {
+        guard let url = URL(string: normalized), let host = url.host?.lowercased() else {
             return .failure(.badURL)
         }
-        if host.contains("gist.github.com") {
+        // 精確比對 host：`contains` 會把 `github.com.evil.example` 也當成 GitHub
+        if host == "gist.github.com" {
             return (await fetchGist(url)).map { [$0] }
         }
-        if host.contains("github.com") {
+        if host == "github.com" || host == "www.github.com" {
             return await fetchGitHubRepo(url)
         }
         return (await fetchHTTP(url)).map { [$0] }
@@ -231,7 +234,7 @@ nonisolated enum PluginImportSource {
     // MARK: 共用
 
     /// 驗 manifest（apiVersion/id/欄位），組 ImportedPlugin。
-    private static func finalize(files: [String: Data], sourceURL: String,
+    static func finalize(files: [String: Data], sourceURL: String,
                                  revision: String?,
                                  updateSource: String) -> Result<ImportedPlugin, PluginImportError> {
         guard let mData = files["plugin.json"] else { return .failure(.noPluginJson) }
@@ -240,6 +243,13 @@ nonisolated enum PluginImportSource {
         }
         guard manifest.apiVersion == 1 else {
             return .failure(.invalidManifest("apiVersion \(manifest.apiVersion) 不支援（只收 1）"))
+        }
+        // id／entry 會變成落地路徑：預覽階段就擋掉路徑穿越與怪字元
+        guard PluginRegistry.isSafeName(manifest.id) else {
+            return .failure(.invalidManifest("id 只允許 A-Z a-z 0-9 . _ -，且不得以 . 開頭或含 .."))
+        }
+        guard PluginRegistry.isSafeEntry(manifest.entry) else {
+            return .failure(.invalidManifest("entry 必須是單一 .js 檔名（字元集同 id）"))
         }
         guard files[manifest.entry] != nil else {
             return .failure(.invalidManifest("找不到 entry：\(manifest.entry)"))
@@ -275,34 +285,57 @@ nonisolated enum PluginImportSource {
 
     /// 把 fetch-once 的 bytes 寫進 Plugins/<id>/，並寫 install-receipt.json。
     /// 覆蓋同 id 的既有目錄（＝更新）。回落地目錄。
-    static func install(_ imported: ImportedPlugin, now: Date) -> Result<URL, PluginImportError> {
-        guard let root = PluginRegistry.pluginsDirectory else {
-            return .failure(.network("找不到插件目錄"))
+    ///
+    /// 先全部寫進 Plugins root 下的隱藏暫存目錄（掃描會跳過），成功才換到定位：
+    /// 中途失敗不會留下半個插件，也不會弄壞原有的那份。
+    static func install(_ imported: ImportedPlugin, now: Date,
+                        root: URL? = PluginRegistry.pluginsDirectory) -> Result<URL, PluginImportError> {
+        guard let root else { return .failure(.installFailed("找不到插件目錄")) }
+        // finalize 已驗過；install 是最後一道關，不假設呼叫端一定走過 finalize
+        guard PluginRegistry.isSafeName(imported.id), PluginRegistry.isSafeEntry(imported.manifest.entry),
+              imported.files.keys.allSatisfy({ !$0.contains("/") && $0 != ".." && $0 != "." }) else {
+            return .failure(.invalidManifest("id／entry／檔名不合法"))
         }
-        let dir = root.appendingPathComponent(imported.id, isDirectory: true)
+        let dir = root.appendingPathComponent(imported.id, isDirectory: true).standardizedFileURL
+        guard dir.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL else {
+            return .failure(.invalidManifest("落地路徑不在插件目錄底下"))
+        }
         let fm = FileManager.default
+        // 大小寫不敏感的檔案系統上 `Foo` 會蓋掉 `foo/`：同名不同大小寫視為衝突
+        let siblings = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+        if let clash = siblings.first(where: {
+            $0 != imported.id && $0.caseInsensitiveCompare(imported.id) == .orderedSame
+        }) {
+            return .failure(.installFailed("\(imported.id)：與既有目錄 \(clash) 只差大小寫"))
+        }
+        let staging = root.appendingPathComponent(".install-\(UUID().uuidString)", isDirectory: true)
         do {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: staging, withIntermediateDirectories: true)
             var receipts: [String: String] = [:]
             for (name, data) in imported.files {
-                try data.write(to: dir.appendingPathComponent(name))
+                try data.write(to: staging.appendingPathComponent(name))
                 receipts[name] = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             }
             // install-receipt.json：出處紀錄（不是完整性驗證）。PluginRegistry 掃描時忽略它。
-            let iso = ISO8601DateFormatter().string(from: now)
             var receipt: [String: Any] = [
                 "sourceURL": imported.sourceURL,
                 "updateSource": imported.updateSource,
-                "importedAt": iso,
+                "importedAt": ISO8601DateFormatter().string(from: now),
                 "sha256": receipts
             ]
             if let rev = imported.revision { receipt["revision"] = rev }
-            if let rData = try? JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys]) {
-                try? rData.write(to: dir.appendingPathComponent("install-receipt.json"))
+            try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys])
+                .write(to: staging.appendingPathComponent("install-receipt.json"))
+
+            if fm.fileExists(atPath: dir.path) {
+                _ = try fm.replaceItemAt(dir, withItemAt: staging)
+            } else {
+                try fm.moveItem(at: staging, to: dir)
             }
             return .success(dir)
         } catch {
-            return .failure(.network("寫入失敗：\(error.localizedDescription)"))
+            try? fm.removeItem(at: staging)
+            return .failure(.installFailed("\(imported.id)：\(error.localizedDescription)"))
         }
     }
 
@@ -339,5 +372,41 @@ nonisolated enum PluginImportSource {
             if oldShas[name] != sha { return fresh }   // 任一檔內容變了 = 有更新
         }
         return nil   // 全部一樣 = 沒更新
+    }
+}
+
+// MARK: - 更新預覽
+
+/// 「檢查更新」找到的一筆待確認更新（尚未落地）。
+nonisolated struct PluginUpdate: Sendable, Identifiable {
+    let fresh: ImportedPlugin
+    /// 目前已裝版本的 manifest（原本就無效的插件為 nil）
+    let installed: PluginManifest?
+
+    var id: String { fresh.id }
+
+    var versionText: String {
+        "v\(installed?.version ?? "?") → v\(fresh.manifest.version)"
+    }
+
+    /// 權限面的差異（capabilities／methods／rewriteAllow／observeNakiTraffic）；沒變回 nil。
+    /// 原本無效的插件沒有舊版可比，一律視為新安裝。
+    var permissionChange: String? {
+        let new = fresh.manifest
+        guard let old = installed else {
+            return "新安裝（原無有效版本）：capabilities \(new.capabilities.joined(separator: ", "))"
+        }
+        var parts: [String] = []
+        for (label, before, after) in [("capabilities", old.capabilities, new.capabilities),
+                                       ("methods", old.methods, new.methods),
+                                       ("rewriteAllow", old.rewriteAllow ?? [], new.rewriteAllow ?? [])] {
+            let added = Set(after).subtracting(before).sorted()
+            let removed = Set(before).subtracting(after).sorted()
+            if !added.isEmpty { parts.append("\(label) 新增 \(added.joined(separator: ", "))") }
+            if !removed.isEmpty { parts.append("\(label) 移除 \(removed.joined(separator: ", "))") }
+        }
+        let before = old.observeNakiTraffic ?? false, after = new.observeNakiTraffic ?? false
+        if before != after { parts.append("observeNakiTraffic \(before) → \(after)") }
+        return parts.isEmpty ? nil : parts.joined(separator: "；")
     }
 }

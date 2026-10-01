@@ -258,6 +258,29 @@ final class NakiActionLayerTests: XCTestCase {
         XCTAssertEqual(triggered, 1)
     }
 
+    /// CR#7：推薦為空時，`bot_trigger` 預檢只在 oplist 有和牌時放行（引擎會交給 resolver）
+    func testBotTriggerPrecheckAllowsHoraWithoutRecommendation() async throws {
+        let shared = LiqiOperationStore.shared
+        shared.reset()
+        defer { shared.reset() }
+        var triggered = 0
+        let context = DefaultNakiMCPContext(
+            dependencies: makeDependencies(
+                store: GameStore(),
+                triggerAutoPlay: TriggerAutoPlayAction(stub: { triggered += 1 })))
+        let tool = BotTriggerTool(context: context)
+
+        shared.record(seat: 0, operations: [LiqiOperation(type: .discard)], contextTile: "5p")
+        var result = try await tool.execute(arguments: [:]) as? [String: Any]
+        XCTAssertEqual(result?["error"] as? String, "no_recommendation")
+        XCTAssertEqual(triggered, 0)
+
+        shared.record(seat: 0, operations: [LiqiOperation(type: .tsumo)], contextTile: "5p")
+        result = try await tool.execute(arguments: [:]) as? [String: Any]
+        XCTAssertEqual(result?["success"] as? Bool, true)
+        XCTAssertEqual(triggered, 1)
+    }
+
     // MARK: - ForceReconnectAction
 
     /// p0-2 的核心：JS 回傳值要被真的讀出來（腳本漏 `return` 時它會是 nil → 0）
@@ -323,5 +346,22 @@ final class NakiActionLayerTests: XCTestCase {
         action(.off)
 
         XCTAssertEqual(received, .off)
+    }
+
+    // MARK: - SetPluginsMayModifyOutboundAction
+
+    func testSetPluginsMayModifyOutboundStubReceivesValue() {
+        var received: [Bool] = []
+        let action = SetPluginsMayModifyOutboundAction(stub: { received.append($0) })
+
+        action(true)
+        action(false)
+
+        XCTAssertEqual(received, [true, false])
+    }
+
+    /// 預設 `NakiActions`（Preview）帶著這個 Action，呼叫不可有副作用也不可崩
+    func testDefaultActionsIncludeNoopOutboundSwitch() {
+        NakiActions().setPluginsMayModifyOutbound(true)
     }
 }

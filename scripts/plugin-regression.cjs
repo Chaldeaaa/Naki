@@ -130,3 +130,46 @@ test('disabling name mask cancels calibration probe immediately',()=>{
   const {c,gl}=renderer();gl.ui=true;c.__nakiHighlight.setNameMask(true);c.__nakiHighlight.maskProbe(0);c.__nakiHighlight.setNameMask(false);
   gl.drawElements(4,60,0,0);assert.deepEqual(gl.draws[0],[1,1,1,1]);assert.equal(c.__nakiHighlight.nameMaskStatus().calibrating,false);
 });
+function notifyEnvelope(method, payload = [0]) {
+  const m = Buffer.from(method);
+  return new Uint8Array([1, 10, m.length, ...m, 18, payload.length, ...payload]);
+}
+function rewriteSetup(methods) {
+  const s = setup(); let ctxs = [];
+  s.c.__nakiPlugins.setGrant('rw', { capabilities: ['observe', 'rewriteReceive'], methods, observeNakiTraffic: true });
+  s.c.__nakiPlugins.register({ id: 'rw', onReceive(ctx) { ctxs.push(ctx); } });
+  return { ...s, ctxs };
+}
+function dispatch(c, direction, bytes) { c.__nakiPlugins.dispatch({ direction, wsId: 1, url: '', bytes }); }
+test('Naki traffic (msgId >= 60000) never gets ctx.replace', () => {
+  const { c, ctxs } = rewriteSetup(['.lq.Foo']);
+  const m = Buffer.from('.lq.Foo');
+  const mk = type => new Uint8Array([type, 0x61, 0xEA, 10, m.length, ...m, 18, 1, 0]);
+  dispatch(c, 'send', mk(2)); dispatch(c, 'receive', mk(3));
+  assert.equal(ctxs.length, 1); assert.equal(ctxs[0].isNaki, true); assert.equal(ctxs[0].replace, undefined);
+});
+test('replace that swaps the method is reverted and counted as a failure', () => {
+  const { c, ctxs } = rewriteSetup(['.lq.FastTest.syncGamX']);
+  const bytes = notifyEnvelope('.lq.FastTest.syncGamX'); const orig = Array.from(bytes);
+  dispatch(c, 'receive', bytes);
+  assert.equal(typeof ctxs[0].replace, 'function');
+  assert.equal(ctxs[0].replace(notifyEnvelope('.lq.FastTest.syncGame')), false);
+  assert.deepEqual(Array.from(bytes), orig);
+  assert.equal(c.__nakiPlugins.diagnostics().runtime.lastError.id, 'rw');
+});
+test('replace keeping the same method still works', () => {
+  const { c, ctxs } = rewriteSetup(['.lq.Foo']);
+  const bytes = notifyEnvelope('.lq.Foo', [1]); dispatch(c, 'receive', bytes);
+  assert.equal(ctxs[0].replace(notifyEnvelope('.lq.Foo', [2])), true);
+  assert.equal(bytes.at(-1), 2);
+});
+test('failures are counted per hook: a healthy hook does not reset a failing one', () => {
+  const { c } = setup();
+  c.__nakiPlugins.setGrant('half', { capabilities: ['observe'], methods: ['.lq.Foo'] });
+  c.__nakiPlugins.register({ id: 'half', onReceive() { throw Error('boom'); }, onRecommendations() {} });
+  for (let i = 0; i < 10; i++) {
+    dispatch(c, 'receive', notifyEnvelope('.lq.Foo'));
+    c.__nakiPlugins.recommendationsChanged([rec()]);
+  }
+  assert.equal(c.__nakiPlugins.list().length, 0);
+});

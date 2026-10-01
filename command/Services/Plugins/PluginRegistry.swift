@@ -178,6 +178,18 @@ nonisolated enum PluginRegistry {
         return out.sorted { $0.id < $1.id }
     }
 
+    /// 清掉崩潰殘留的 `.install-*` 暫存目錄。超過一小時才算殘留，不碰進行中的安裝。
+    static func removeStaleStaging(in directory: URL? = pluginsDirectory, olderThan age: TimeInterval = 3600) {
+        guard let directory else { return }
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? [] where name.hasPrefix(".install-") {
+            let url = directory.appendingPathComponent(name)
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            if Date().timeIntervalSince(modified) > age { try? fm.removeItem(at: url) }
+        }
+    }
+
     /// 讀單一插件目錄並驗證（不執行任何插件程式碼）。
     static func load(directory: URL) -> PluginDescriptor {
         let dirName = directory.lastPathComponent
@@ -197,9 +209,22 @@ nonisolated enum PluginRegistry {
                                     failure: .manifestInvalid("\(error.localizedDescription)"))
         }
 
-        // apiVersion exact match（§7.10(b)）
+        // id／entry 會被內插進路徑與注入 script：字元集不合就整個插件不載入
+        guard isSafeName(manifest.id) else {
+            return PluginDescriptor(id: dirName, directory: directory, manifest: nil,
+                                    entrySource: nil,
+                                    failure: .manifestInvalid("id 只允許 A-Z a-z 0-9 . _ -，且不得以 . 開頭或含 .."))
+        }
+        guard isSafeEntry(manifest.entry) else {
+            return PluginDescriptor(id: dirName, directory: directory, manifest: nil,
+                                    entrySource: nil,
+                                    failure: .manifestInvalid("entry 必須是單一 .js 檔名（字元集同 id）"))
+        }
+
+        // apiVersion exact match（§7.10(b)）。id 取目錄名：移除與啟用清單都以實際目錄為準，
+        // 不讓 manifest 自稱的 id 指到另一個插件。
         guard manifest.apiVersion == 1 else {
-            return PluginDescriptor(id: manifest.id, directory: directory, manifest: nil,
+            return PluginDescriptor(id: dirName, directory: directory, manifest: nil,
                                     entrySource: nil,
                                     failure: .apiVersionUnsupported(manifest.apiVersion))
         }
@@ -268,8 +293,9 @@ nonisolated enum PluginRegistry {
         for d in active {
             guard let source = d.entrySource else { continue }
             // 每個插件的**執行**包在 try/catch（runtime 錯誤隔離；語法錯見上方 Phase 1 限制）
-            parts.append("// --- plugin: \(d.id) ---")
-            parts.append("try {\n\(source)\n} catch (e) { console.error('[Naki Plugin] \(d.id) 載入錯誤', e); }")
+            let idLit = jsStringLiteral(d.id)
+            parts.append("// --- plugin: \(idLit) ---")
+            parts.append("try {\n\(source)\n} catch (e) { console.error('[Naki Plugin]', \(idLit), '載入錯誤', e); }")
         }
         return parts.joined(separator: "\n")
     }
@@ -289,7 +315,12 @@ nonisolated enum PluginRegistry {
             // settings 值 = 使用者覆寫 ?? default（§7.10a）
             var resolved: [String: Any] = [:]
             for (key, field) in schema {
-                resolved[key] = overrides[key] ?? field.defaultValue.jsonValue
+                // 舊版存進 UserDefaults 的 NaN／Inf 會讓 JSONSerialization 丟 ObjC 例外，丟掉改用 default
+                if let o = overrides[key], (o as? Double)?.isFinite != false {
+                    resolved[key] = o
+                } else {
+                    resolved[key] = field.defaultValue.jsonValue
+                }
             }
             grant["settings"] = resolved
         }
@@ -330,18 +361,35 @@ nonisolated enum PluginRegistry {
         return "if (window.__nakiPlugins && window.__nakiPlugins.disable) { window.__nakiPlugins.disable(\(idLit)); }"
     }
 
+    /// id／entry 檔名的白名單：`[A-Za-z0-9._-]`，不得以 `.` 開頭、不得含 `..`。
+    /// 同時擋路徑穿越（`/`、`..`）與破壞注入 script 的字元（引號、換行、U+2028）。
+    static func isSafeName(_ s: String) -> Bool {
+        !s.isEmpty && s.utf8.count <= 128 && !s.hasPrefix(".") && !s.contains("..")
+            && s.utf8.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 | 0x20 >= 0x61 && $0 | 0x20 <= 0x7a)
+                || $0 == 0x2E || $0 == 0x5F || $0 == 0x2D }
+    }
+
+    static func isSafeEntry(_ s: String) -> Bool { isSafeName(s) && s.hasSuffix(".js") }
+
     /// 移除插件：刪掉 `Plugins/<id>/` 整個目錄。
-    ///
-    /// destructive——但可逆（重新匯入／放檔案即可）。preflight：id 非空、解出的目錄
-    /// **必須真的在 Plugins root 底下**（擋 id 含 `..` 的路徑穿越）。已不存在視為成功。
-    /// 呼叫端（NakiRuntime）負責移除前先熱停用（從頁面卸掉 + 清 enabledPluginIds）。
-    /// 回傳 nil＝成功；非 nil＝錯誤訊息。
     static func remove(id: String) -> String? {
         guard !id.isEmpty else { return "id 為空" }
         guard let root = pluginsDirectory else { return "找不到插件目錄" }
-        let dir = root.appendingPathComponent(id, isDirectory: true).standardizedFileURL
-        guard dir.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL else {
-            return "非法路徑（拒絕刪除 \(id)）"
+        return remove(directory: root.appendingPathComponent(id, isDirectory: true))
+    }
+
+    /// 刪掉指定的插件目錄（以掃描到的**實際目錄**為準，不重新用 id 推路徑）。
+    ///
+    /// destructive——但可逆（重新匯入／放檔案即可）。preflight：目錄
+    /// **必須真的在 Plugins root 底下**（擋 `..` 的路徑穿越）。已不存在視為成功。
+    /// 呼叫端（NakiRuntime）負責移除前先熱停用（從頁面卸掉 + 清 enabledPluginIds）。
+    /// 回傳 nil＝成功；非 nil＝錯誤訊息。
+    static func remove(directory: URL, root: URL? = pluginsDirectory) -> String? {
+        guard let root else { return "找不到插件目錄" }
+        let dir = directory.standardizedFileURL
+        guard dir.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
+              !dir.lastPathComponent.isEmpty else {
+            return "非法路徑（拒絕刪除 \(dir.lastPathComponent)）"
         }
         let fm = FileManager.default
         guard fm.fileExists(atPath: dir.path) else { return nil }

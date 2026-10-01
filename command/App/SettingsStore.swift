@@ -88,6 +88,24 @@ final class SettingsStore {
         }
     }
 
+    /// 背景保活的持久化 key。
+    nonisolated static let keepAliveInBackgroundKey = "naki.keepAliveInBackground"
+
+    /// 預設開：未設定過的 key 視為 true（`UserDefaults.bool` 會回 false，所以不能直接用）。
+    nonisolated static func loadKeepAliveInBackground(
+        from defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: keepAliveInBackgroundKey) as? Bool ?? true
+    }
+
+    /// 視窗在背景時讓遊戲主迴圈以低頻率繼續跑，否則 WebKit 停掉 rAF、Unity 不送心跳而斷線
+    /// （實作見 `naki-core.js` 的 `__nakiKeepAlive`）。寫入即持久化。
+    var keepAliveInBackground: Bool = SettingsStore.loadKeepAliveInBackground() {
+        didSet {
+            guard keepAliveInBackground != oldValue else { return }
+            UserDefaults.standard.set(keepAliveInBackground, forKey: Self.keepAliveInBackgroundKey)
+        }
+    }
+
     // MARK: - 已啟用的插件
 
     nonisolated static let enabledPluginIdsKey = "naki.plugins.enabledIds"

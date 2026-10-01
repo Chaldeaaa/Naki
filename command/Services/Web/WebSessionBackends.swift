@@ -85,22 +85,47 @@ final class WebPageBackend: WebSessionBackend {
     private func startObservingNavigations() {
         navigationTask?.cancel()
         navigationTask = Task { [weak self] in
-            guard let page = self?.page else { return }
-            do {
-                for try await event in page.navigations {
-                    guard let sink = self?.sink else { return }
-                    switch event {
-                    case .startedProvisionalNavigation: sink.webDidStartNavigation()
-                    case .committed: sink.webDidCommitNavigation()
-                    case .finished: sink.webDidFinishNavigation()
-                    case .receivedServerRedirect: break
-                    @unknown default: break
+            // provisional 失敗（離線、DNS、載入中又 reload 的 -999）會讓事件序列 throw 而結束；
+            // 不重新訂閱的話，之後的 reload／換服都收不到事件，失敗橫幅也永遠不會消失。
+            // 第一次失敗立刻重訂閱（免得漏掉新導覽的事件），連續失敗才退避。
+            var backoff = Duration.zero
+            while !Task.isCancelled {
+                guard let page = self?.page else { return }
+                do {
+                    for try await event in page.navigations {
+                        backoff = .zero
+                        guard let sink = self?.sink else { return }
+                        switch event {
+                        case .startedProvisionalNavigation: sink.webDidStartNavigation()
+                        case .committed: sink.webDidCommitNavigation()
+                        case .finished: sink.webDidFinishNavigation()
+                        case .receivedServerRedirect: break
+                        @unknown default: break
+                        }
                     }
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    if let message = Self.navigationFailureMessage(error) {
+                        self?.sink?.webDidFailNavigation(message)
+                    }
+                    if backoff > .zero { try? await Task.sleep(for: backoff) }
+                    backoff = min(max(backoff * 2, .milliseconds(100)), .seconds(5))
                 }
-            } catch {
-                self?.sink?.webDidFailNavigation(error.localizedDescription)
             }
         }
+    }
+
+    /// 被新導覽取代的取消（-999）不是失敗，回 nil。
+    /// `WebPage.NavigationError` 是 enum，`as NSError` 拿到的 code 是 case index，必須先解出底層 error。
+    nonisolated static func navigationFailureMessage(_ error: Error) -> String? {
+        var underlying = error
+        if case .failedProvisionalNavigation(let inner)? = error as? WebPage.NavigationError {
+            underlying = inner
+        }
+        let nsError = underlying as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return nil }
+        return underlying.localizedDescription
     }
 }
 
@@ -193,6 +218,8 @@ final class LegacyWebBackend: NSObject, WebSessionBackend, WKNavigationDelegate,
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = userContentController
         configuration.mediaTypesRequiringUserActionForPlayback = []
+        // 隱藏時不要讓系統降頻遊戲頁（WebPage path 沒有暴露 preferences）
+        configuration.preferences.inactiveSchedulingPolicy = .none
         #if os(iOS)
             configuration.allowsInlineMediaPlayback = true
         #endif
@@ -264,6 +291,21 @@ final class LegacyWebBackend: NSObject, WebSessionBackend, WKNavigationDelegate,
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        reportFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        reportFailure(error)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        sink?.webDidFailNavigation("網頁程序已終止")
+    }
+
+    /// 三種失敗走同一條回報；-999 是被新導覽取代，不算失敗
+    private func reportFailure(_ error: Error) {
+        guard (error as NSError).code != NSURLErrorCancelled else { return }
         sink?.webDidFailNavigation(error.localizedDescription)
     }
 

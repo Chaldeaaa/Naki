@@ -111,6 +111,9 @@ final class WebSession {
     /// JS 模組的開關是 closure 內的變數，reload 會歸零；不重推的話設定只在當次載入有效。
     private var hasAppliedHideNames = false
 
+    private var keepAliveTask: Task<Void, Never>?
+    private var keepAliveActivity: NSObjectProtocol?
+
     /// 這條 path 是否提供自動送出（`SettingsStore.supportsAutoPlay` 由此而來）
     var supportsAutoPlay: Bool { backend.supportsAutoPlay }
 
@@ -150,15 +153,24 @@ final class WebSession {
     /// 插件源碼／啟用清單／設定一變就要重建，否則頁面 reload 會退回啟動當下的插件。
     /// `websocketScript` 為 nil＝模組載入失敗且**沒有 fallback**：什麼都不注入，
     /// 插件也無從掛起（見 `WebSocketInterceptor.createUserScript()`）。
+    ///
+    /// remove→add 不是原子的（中間 reload 的頁面會漏注入），所以內容沒變就不重建，縮小窗口。
     func setPluginInjection(_ source: String?) {
+        let key = source ?? ""
+        guard key != appliedPluginInjection else { return }
+        appliedPluginInjection = key
         controller.removeAllUserScripts()
         guard let websocketScript else { return }
         controller.addUserScript(websocketScript)
-        if let source, !source.isEmpty {
+        if !key.isEmpty {
+            // 只注入主 frame：國服頁面有 cross-origin 的第三方 iframe，插件不該跑進去
             controller.addUserScript(WKUserScript(
-                source: source, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+                source: key, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
     }
+
+    /// 上一次建進 controller 的插件注入源碼（nil＝還沒建過；無插件為 ""）
+    private var appliedPluginInjection: String?
 
     /// `@MainActor` class 在 NakiTests host 釋放會 SIGABRT（見 CLAUDE.md「專案結構的坑」）
     nonisolated deinit {}
@@ -321,7 +333,8 @@ final class WebSession {
         let arr: [[String: Any]] = recs.map { r in
             var d: [String: Any] = [
                 "label": r.label,
-                "probability": r.probability,
+                // NaN／Inf 會讓 JSONSerialization 丟 ObjC 例外（`try?` 攔不到）
+                "probability": r.probability.isFinite ? r.probability : 0,
                 "actionType": r.actionType.rawValue,
                 "displayTile": r.displayTile
             ]
@@ -362,6 +375,65 @@ final class WebSession {
         }
     }
 
+    // MARK: - 背景保活
+
+    /// 寫入設定並推給 JS。JS 預設就是開，所以載入後只需要在關閉時真的改變狀態，
+    /// 但兩種值都推，讓頁面狀態永遠等於設定。
+    func setKeepAliveInBackground(_ enabled: Bool) {
+        settings.keepAliveInBackground = enabled
+        pushKeepAlive()
+    }
+
+    private func pushKeepAlive() {
+        let enabled = settings.keepAliveInBackground
+        Task {
+            do {
+                _ = try await backend.callJavaScript(
+                    "window.__nakiKeepAlive?.set(\(enabled)); return null;")
+            } catch {
+                bridgeLog("[WebSession] 設定背景保活錯誤: \(error.localizedDescription)")
+            }
+        }
+        if enabled { startKeepAliveLoop() } else { stopKeepAliveLoop() }
+    }
+
+    /// 隱藏約 10 分鐘後系統會把 WebContent 整個暫停，頁內計時器救不了；
+    /// 只有從 Swift 呼叫 `callJavaScript` 喚得醒它。隱藏時每秒 tick，可見時每 10 秒探一次。
+    /// 隱藏期間也持有 activity，Naki 自己才不會被 App Nap（仍允許系統閒置睡眠）。
+    private func startKeepAliveLoop() {
+        guard keepAliveTask == nil else { return }
+        keepAliveTask = Task { [weak self] in
+            var hidden = false
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let value = try? await self.backend.callJavaScript(
+                    "return window.__nakiKeepAlive ? window.__nakiKeepAlive.tick() : false") as? Bool {
+                    hidden = value
+                }
+                // stop 已在 await 期間釋放過 activity，這裡不能再建一個沒人收的
+                if Task.isCancelled { return }
+                self.setKeepAliveActivity(hidden)
+                try? await Task.sleep(for: hidden ? .seconds(1) : .seconds(10))
+            }
+        }
+    }
+
+    private func stopKeepAliveLoop() {
+        keepAliveTask?.cancel()
+        keepAliveTask = nil
+        setKeepAliveActivity(false)
+    }
+
+    private func setKeepAliveActivity(_ active: Bool) {
+        if active, keepAliveActivity == nil {
+            keepAliveActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep, reason: "Naki background keep-alive")
+        } else if !active, let activity = keepAliveActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            keepAliveActivity = nil
+        }
+    }
+
     /// 內建暱稱隱藏**已移除**（2026-08-10，交給插件）：頁面載入後不再自動套用。
     /// 底層 API（`__nakiHideNames` 協定層、`__nakiHighlight.setNameMask` 渲染層）仍保留，
     /// 插件可自行呼叫。`setHidePlayerNames` 方法留著但已無內建呼叫端。
@@ -394,6 +466,8 @@ extension WebSession: WebNavigationSink {
         store.pageLoadFailure = nil
         // JS 模組的開關是 closure 內的變數，reload 會歸零，必須重新套用
         applyHideNamesIfNeeded()
+        // 同上：JS 端的開關 reload 後回到預設（開），使用者關掉的話要重推
+        pushKeepAlive()
         if !store.isConnected {
             store.statusMessage = "已載入，等待 WebSocket 連接..."
         }

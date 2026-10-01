@@ -25,5 +25,8 @@ struct NakiApp: App {
                 // 否則 View 會讀到第二個空 `GameStore`（雙重真實來源）。
                 .environment(\.naki, runtime.environment)
         }
+        // ⌘N 會開第二個 ContentView，把同一個 WebPage 綁到第二個 WebView（SIGTRAP）。
+        // runtime 只有一份，視窗也只能有一個。
+        .commands { CommandGroup(replacing: .newItem) {} }
     }
 }

@@ -36,20 +36,24 @@ struct ContentView: View {
     @State private var draftPrefersSanma = false
     @State private var draftRoomPreference: RoomPreference = .lowest
 
-    /// 這次的設定表是不是按「開始」關掉的。
-    ///
-    /// 判斷放在 `onDismiss` 而不是取消鈕的 action：按 Esc 或點視窗外關掉 sheet 時，
-    /// SwiftUI **不會**呼叫取消鈕的 action，模式就會停在「全自動」但設定沒確認
-    /// （2026-08-09 實測）。`onDismiss` 是唯一不論怎麼關都會走到的地方。
-    @State private var fullAutoConfirmed = false
-
-    // 自動打牌控制
-    //
-    // key 與 runtime 共用（`AutoPlayModeStore.key`）：UI 與送出端各記各的 key，
-    // picker 顯示的模式就會跟實際驅動送出的模式不一致。
-    // 舊 key 的一次性遷移在 `NakiApp.init()`。
-    @AppStorage(AutoPlayModeStore.key) private var autoPlayMode: AutoPlayMode = AutoPlayModeStore
-        .defaultMode
+    /// Picker 的選取值。讀 runtime 的生效模式、不綁存檔：選「全自動」在確認前不能寫入，
+    /// 取消後也自然回到取消當下的實際模式（表單開著時 MCP 改了模式也不會被覆蓋）。
+    private var autoPlayModeSelection: Binding<AutoPlayMode> {
+        Binding(
+            get: { showFullAutoKindChoice ? .fullAuto : naki.store.autoPlayMode },
+            set: { newValue in
+                // 全自動會**主動把帳號排進伺服器隊列**，排哪一種必須是使用者當下說的，
+                // 不是沿用一個他看不到的舊設定。每次切進來都問（帶上次的選擇當預設）。
+                // （模式已經是全自動＝別處設的，例如 MCP，就不再問。）
+                if newValue == .fullAuto && naki.store.autoPlayMode != .fullAuto {
+                    draftPrefersSanma = naki.settings.fullAutoPrefersSanma
+                    draftRoomPreference = naki.settings.fullAutoRoomPreference
+                    showFullAutoKindChoice = true
+                } else {
+                    naki.actions.setAutoPlayMode(newValue)
+                }
+            })
+    }
 
     /// 這條 WebView 路徑真的能執行的模式（Legacy 沒有「自動」，見 `AutoPlayAvailability`）
     private var availableAutoPlayModes: [AutoPlayMode] {
@@ -82,7 +86,7 @@ struct ContentView: View {
     /// `width` 傳 `nil` 代表不約束寬度：segmented control 會自己撐滿父容器。
     /// iOS 的右側欄用這條——欄寬改了不必回頭同步一個寫死的點數。
     private func autoPlayModePicker(width: CGFloat?, menu: Bool = false) -> some View {
-        Picker("模式", selection: $autoPlayMode) {
+        Picker("模式", selection: autoPlayModeSelection) {
             // 選項來自 `AutoPlayAvailability`：不支援自動送出的路徑上，
             // 「自動」不是灰掉的按鈕而是根本不存在——灰掉的控制照樣要解釋，
             // 而解釋放在進階設定裡（`autoPlayAvailabilityBox`）。
@@ -95,38 +99,20 @@ struct ContentView: View {
         .modifier(ModePickerStyle(menu: menu))
         // a11y: fixed width for segmented control; kept to preserve toolbar layout
         .frame(width: width)
-        .onChange(of: autoPlayMode) { _, newValue in
-            // 收斂與持久化在 `NakiRuntime.setAutoPlayMode` → `AutoPlayAvailability.commit`；
-            // Action 只是這個 View 對「切模式」這件副作用的型別化入口。
-            naki.actions.setAutoPlayMode(newValue)
-
-            // 全自動會**主動把帳號排進伺服器隊列**，排哪一種必須是使用者當下說的，
-            // 不是沿用一個他看不到的舊設定。每次切進來都問（帶上次的選擇當預設）。
-            if newValue == .fullAuto {
-                draftPrefersSanma = naki.settings.fullAutoPrefersSanma
-                draftRoomPreference = naki.settings.fullAutoRoomPreference
-                showFullAutoKindChoice = true
-            }
-        }
         // 用 sheet 而不是 confirmationDialog：人數 × 房間偏好共 4 種組合，
         // macOS 的 confirmationDialog 只渲染得下 3 個按鈕＋取消——實測第 4 個
         // 「三人麻將・最高房」直接消失，而取消鈕被畫成「OK」。選項用 Picker 表達
         // 就不受按鈕數限制，也讓兩個維度看起來像兩個維度。
-        .sheet(isPresented: $showFullAutoKindChoice, onDismiss: {
-            // 沒按「開始」就退回「自動」：這一局照打，但不會自己再開下一場。
-            // 只寫 `autoPlayMode`，不要再呼叫一次 `setAutoPlayMode`——
-            // 上面的 `onChange` 已經會轉呼叫，兩邊都做會執行兩次（log 印兩行）。
-            if !fullAutoConfirmed { autoPlayMode = .auto }
-            fullAutoConfirmed = false
-        }) {
+        // 按 Esc 或點視窗外關掉也走同一條：模式本來就沒動，取消不需要任何還原。
+        .sheet(isPresented: $showFullAutoKindChoice) {
             FullAutoSetupSheet(
                 sanma: $draftPrefersSanma,
                 room: $draftRoomPreference,
                 cloudActive: naki.settings.cloudConfig.isActive,
                 onStart: {
                     applyFullAutoChoice(sanma: draftPrefersSanma, room: draftRoomPreference)
-                    fullAutoConfirmed = true
                     showFullAutoKindChoice = false
+                    naki.actions.setAutoPlayMode(.fullAuto)
                     // 在大廳按「開始」就該立刻排一場——續局引擎是 end_game 驅動的，
                     // 大廳沒有 end_game 可等，不踢這一腳就會什麼都不發生。
                     naki.actions.startFullAutoNow()
@@ -274,17 +260,6 @@ struct ContentView: View {
 #endif
             }
         }
-        .task {
-            // 存檔可能是在支援自動送出的裝置上寫下的 `.auto`。Picker 上沒有那個選項時，
-            // 選取值對不到任何 tag，segmented control 會顯示成「沒有任何一段被選中」；
-            // runtime 那邊也已經降級成推薦，兩邊必須講同一句話。
-            let clamped = AutoPlayAvailability.clamp(
-                autoPlayMode, autoPlaySupported: naki.settings.supportsAutoPlay)
-            if clamped != autoPlayMode {
-                autoPlayMode = clamped
-                naki.actions.setAutoPlayMode(clamped)
-            }
-        }
     }
 
     // MARK: - macOS Layout
@@ -307,6 +282,7 @@ struct ContentView: View {
                 JSInjectionFailureBanner()
                 LiqiParseFailureBanner()
                 PageLoadFailureBanner()
+                BotFailureBanner()
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -504,6 +480,9 @@ struct ContentView: View {
                     }
                     .safeAreaInset(edge: .top) {
                         LiqiParseFailureBanner()
+                    }
+                    .safeAreaInset(edge: .top) {
+                        BotFailureBanner()
                     }
                     // 狀態訊息回到牌桌底部（預設關，見 `SettingsStore.showStatusBar`）。
                     // 掛在 WebView 上而不是整個 ZStack 上：橫跨全寬會連面板底部一起壓。
@@ -956,20 +935,16 @@ struct AdvancedSettingsSheet: View {
     }
     #endif
 
-    /// 隱藏玩家名稱的持久化來源只有 `SettingsStore` 一份。
-    ///
-    /// **不要改回 `@AppStorage("HidePlayerNames")`**：那會讓同一個設定多一個寫入點，
-    /// 而且 key 是字面值字串（唯一定義在 `SettingsStore.hidePlayerNamesKey`）。
-    private var hidePlayerNames: Binding<Bool> {
-        Binding(get: { naki.settings.hidePlayerNames },
-                set: { naki.actions.setHidePlayerNames($0) })
-    }
-
-    /// 狀態訊息列的顯示與否。純顯示設定，沒有副作用要走 Action——
-    /// 與 `hidePlayerNames` 不同，那個要連動 `WebSession` 去改注入的 JS。
+    /// 狀態訊息列的顯示與否。純顯示設定，沒有副作用要走 Action。
     private var showStatusBar: Binding<Bool> {
         Binding(get: { naki.settings.showStatusBar },
                 set: { naki.settings.showStatusBar = $0 })
+    }
+
+    /// 背景保活。setter 走 Action：要即時推給已載入的頁面。
+    private var keepAliveInBackground: Binding<Bool> {
+        Binding(get: { naki.settings.keepAliveInBackground },
+                set: { naki.actions.setKeepAliveInBackground($0) })
     }
 
     /// 區服。setter 走 Action 而不是直接寫 settings——換服要整頁重載，
@@ -1312,6 +1287,16 @@ struct AdvancedSettingsSheet: View {
             // 畫面
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
+                    Toggle("視窗在背景時保持遊戲運作", isOn: keepAliveInBackground)
+                        .accessibilityIdentifier("keep-alive-in-background-toggle")
+
+                    Text("視窗被蓋住或 App 隱藏時，遊戲仍以低頻率運作，避免停止心跳而斷線；會持續耗用少量 CPU。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
                     Text("暱稱隱藏與牌面高亮已改由**插件**提供（工具列拼圖圖示 → 插件頁面）。裝「暱稱隱藏」「牌面變色」插件即可；底層 API 仍在，只是不再內建自動開。")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -1609,6 +1594,29 @@ struct PageLoadFailureBanner: View {
     }
 }
 
+/// Bot 推論失敗的常駐橫幅（`botFailure` 在下一次成功的 bot 回應時清掉）。
+struct BotFailureBanner: View {
+
+    @Environment(\.naki) private var naki
+
+    var body: some View {
+        if let reason = naki.store.botFailure {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .imageScale(.large)
+                Text(reason)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.15))
+            .accessibilityIdentifier("bot-failure-banner")
+        }
+    }
+}
+
 /// 資料來源是 `JSInjectionState.shared`（`@Observable`），
 /// 由 `WebSocketInterceptor.createUserScript()` 在建立 WebView 時寫入。
 struct JSInjectionFailureBanner: View {
@@ -1864,6 +1872,8 @@ struct PluginsPageView: View {
     @State private var importError: String?
     @State private var importMessage: String?
     @State private var updateChecking = false
+    @State private var pendingUpdates: [PluginUpdate] = []   // 檢查到、等使用者確認的更新
+    @State private var confirmingOutbound = false            // L3 總開關由關轉開的確認
     @State private var selectedImports: Set<String> = []   // 預覽中勾選要引入的 id
 
     // 移除插件的確認
@@ -2211,6 +2221,30 @@ struct PluginsPageView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if !pendingUpdates.isEmpty {
+                    Divider()
+                    Text("有 \(pendingUpdates.count) 個插件可更新——確認後才會安裝並熱重載：")
+                        .font(.caption).bold()
+                    ForEach(pendingUpdates) { u in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("\(u.id) · \(u.versionText)")
+                                .font(.system(.caption, design: .monospaced))
+                            if let change = u.permissionChange {
+                                Text("權限變更：\(change)").font(.caption2).foregroundColor(.red)
+                            } else {
+                                Text("權限宣告未變").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Text("⚠️ 更新＝執行作者新寫的程式碼，等同重新信任。")
+                        .font(.caption2).foregroundColor(.red)
+                    HStack {
+                        Button("更新這些（\(pendingUpdates.count)）") { confirmUpdates() }
+                            .buttonStyle(.borderedProminent)
+                        Button("取消") { pendingUpdates = [] }
+                    }
+                }
+
                 if !importPreview.isEmpty {
                     Divider()
                     HStack {
@@ -2289,38 +2323,29 @@ struct PluginsPageView: View {
 
     private func confirmImportSelected() {
         let chosen = importPreview.filter { selectedImports.contains($0.id) }
-        var ok = 0
-        for p in chosen {
-            if case .success = PluginImportSource.install(p, now: Date()) { ok += 1 }
-        }
-        naki.actions.rescanPlugins()               // 刷新清單（@Observable → 立即反映）
+        let failures = naki.actions.installPlugins(chosen)
         importPreview = []
         selectedImports = []
         importURL = ""
-        importMessage = "已引入 \(ok)/\(chosen.count) 個插件。在上面清單啟用（熱插拔，免重載）。"
+        importMessage = "已引入 \(chosen.count - failures.count)/\(chosen.count) 個插件。在上面清單啟用（熱插拔，免重載）。"
+        importError = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
 
-    /// 檢查每個已裝插件有沒有更新；有的話一鍵更新（重抓 + 覆蓋 + 熱重載）。
+    /// 第一段：只檢查、列出有新版的插件，不安裝也不熱重載。
     private func checkUpdates() async {
-        updateChecking = true; importError = nil; importMessage = nil
-        var updated = 0, checked = 0
-        for d in naki.pluginDescriptors {
-            checked += 1
-            guard let fresh = await PluginImportSource.fetchUpdate(pluginId: d.id) else { continue }
-            if case .success = PluginImportSource.install(fresh, now: Date()) {
-                updated += 1
-                // 熱重載：啟用中的話 disable→enable 帶新源碼
-                if naki.settings.enabledPluginIds.contains(d.id) {
-                    naki.actions.setPluginEnabled(d.id, false)
-                    naki.actions.setPluginEnabled(d.id, true)
-                }
-            }
-        }
-        naki.actions.rescanPlugins()
+        updateChecking = true; importError = nil; importMessage = nil; pendingUpdates = []
+        pendingUpdates = await naki.actions.checkPluginUpdates()
         updateChecking = false
-        importMessage = updated > 0
-            ? "更新了 \(updated) 個插件（已熱重載套用）。"
-            : "檢查了 \(checked) 個，沒有更新。"
+        if pendingUpdates.isEmpty { importMessage = "檢查了 \(naki.pluginDescriptors.count) 個，沒有更新。" }
+    }
+
+    /// 第二段：使用者確認後才安裝（已啟用的會熱重載）。
+    private func confirmUpdates() {
+        let updates = pendingUpdates
+        let failures = naki.actions.installPlugins(updates.map(\.fresh))
+        pendingUpdates = []
+        importMessage = "更新了 \(updates.count - failures.count)/\(updates.count) 個插件（已啟用的會熱重載）。"
+        importError = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
 
     // MARK: 信任 / L3（分頁）
@@ -2332,10 +2357,10 @@ struct PluginsPageView: View {
                 // L3 總開關（§8.1）：預設關。開啟＝允許插件用你的帳號送遊戲動作。
                 Toggle(isOn: Binding(
                     get: { naki.settings.pluginsMayModifyOutbound },
+                    // 由關轉開先確認；關掉直接生效
                     set: { on in
-                        naki.settings.pluginsMayModifyOutbound = on
-                        let js = "window.__nakiPluginsMayModifyOutbound = \(on ? "true" : "false");"
-                        Task { _ = try? await naki.actions.executeJavaScript(js) }
+                        if on { confirmingOutbound = true }
+                        else { naki.actions.setPluginsMayModifyOutbound(false) }
                     }
                 )) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -2362,6 +2387,12 @@ struct PluginsPageView: View {
         } label: {
             Label("信任邊界與 L3 權限", systemImage: "lock.shield")
         }
+        .confirmationDialog("允許插件送出遊戲動作？", isPresented: $confirmingOutbound) {
+            Button("開啟", role: .destructive) { naki.actions.setPluginsMayModifyOutbound(true) }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("插件將能用你的帳號送出 Liqi request、改寫收到的封包。只在測試帳號、且你信任插件時開。")
+        }
     }
 
     /// 單一設定欄位的控制項（string→TextField、number→TextField、boolean→Toggle）。
@@ -2377,8 +2408,7 @@ struct PluginsPageView: View {
                         ?? { if case .boolean(let b) = field.defaultValue { return b }; return false }()
                 },
                 set: { v in
-                    naki.settings.setPluginSettingValue(pluginId: pluginId, key: key, value: v)
-                    naki.actions.setPluginEnabled(pluginId, true)   // 熱重載套用
+                    naki.actions.setPluginSetting(pluginId, key, v)
                 }
             ))
             .font(.caption)
@@ -2392,8 +2422,9 @@ struct PluginsPageView: View {
                             ?? { if case .number(let d) = field.defaultValue { return d }; return 0 }()
                     },
                     set: { v in
-                        naki.settings.setPluginSettingValue(pluginId: pluginId, key: key, value: v)
-                        naki.actions.setPluginEnabled(pluginId, true)
+                        // NaN／Inf 存進 UserDefaults 會讓之後每次組 grant 都崩
+                        guard v.isFinite else { return }
+                        naki.actions.setPluginSetting(pluginId, key, v)
                     }
                 ), format: .number)
                 .frame(width: 100)
@@ -2406,16 +2437,13 @@ struct PluginsPageView: View {
             HStack {
                 Text(label).font(.caption)
                 Spacer()
-                TextField("", text: Binding(
-                    get: {
-                        (naki.settings.pluginSettingValue(pluginId: pluginId, key: key) as? String)
-                            ?? { if case .string(let s) = field.defaultValue { return s }; return "" }()
-                    },
-                    set: { v in
-                        naki.settings.setPluginSettingValue(pluginId: pluginId, key: key, value: v)
-                        naki.actions.setPluginEnabled(pluginId, true)
-                    }
-                ))
+                PluginStringSettingField(
+                    current: (naki.settings.pluginSettingValue(pluginId: pluginId, key: key) as? String)
+                        ?? { if case .string(let s) = field.defaultValue { return s }; return "" }(),
+                    commit: { v in
+                        naki.actions.setPluginSetting(pluginId, key, v)
+                    })
+                .id("\(pluginId).\(key)")
                 .frame(width: 160)
                 .font(.system(.caption, design: .monospaced))
                 .textFieldStyle(.roundedBorder)
@@ -2502,5 +2530,31 @@ struct PluginsPageView: View {
         } label: {
             Label("插件 Log（即時）", systemImage: "text.append")
         }
+    }
+}
+
+/// 字串設定欄位：提交（Return）或失焦才套用，避免每個鍵擊都熱重載＋寫 UserDefaults。
+private struct PluginStringSettingField: View {
+    let current: String
+    let commit: (String) -> Void
+    @State private var text: String
+    @FocusState private var focused: Bool
+
+    init(current: String, commit: @escaping (String) -> Void) {
+        self.current = current
+        self.commit = commit
+        _text = State(initialValue: current)
+    }
+
+    var body: some View {
+        TextField("", text: $text)
+            .focused($focused)
+            .onSubmit(apply)
+            .onChange(of: focused) { _, isFocused in if !isFocused { apply() } }
+            .onDisappear(perform: apply)
+    }
+
+    private func apply() {
+        if text != current { commit(text) }
     }
 }

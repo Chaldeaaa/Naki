@@ -16,6 +16,8 @@
 //
 
 import XCTest
+import WebKit
+@testable import Naki
 
 final class PlatformDivergenceTests: XCTestCase {
 
@@ -103,5 +105,20 @@ final class PlatformDivergenceTests: XCTestCase {
             leaked.isEmpty,
             "WebPage／WKWebView 只准在 `Services/Web/` 內被建立；實際: "
                 + leaked.map { "\($0.file):\($0.line)" }.joined(separator: ", "))
+    }
+
+    // MARK: - WebPage 導覽錯誤解包
+
+    /// `WebPage.NavigationError` 是 enum：直接 `as NSError` 的 code 是 case index，永遠不等於 -999
+    func testNavigationFailureMessageUnwrapsCancelled() throws {
+        guard #available(macOS 26.0, iOS 26.0, *) else { throw XCTSkip("WebPage 需要 26+") }
+        let cancelled = WebPage.NavigationError.failedProvisionalNavigation(
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
+        XCTAssertNil(WebPageBackend.navigationFailureMessage(cancelled), "-999 不算失敗")
+
+        let offline = WebPage.NavigationError.failedProvisionalNavigation(
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet))
+        XCTAssertNotNil(WebPageBackend.navigationFailureMessage(offline))
+        XCTAssertNotNil(WebPageBackend.navigationFailureMessage(WebPage.NavigationError.pageClosed))
     }
 }
