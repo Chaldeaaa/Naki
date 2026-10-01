@@ -106,24 +106,24 @@ struct SidebarHeader: View {
             Circle()
                 .fill(isActive ? Color.green : Color.gray)
                 .frame(width: 7, height: 7)
-            Text(isActive ? "運行中" : "待機")
+            (isActive ? Text("運行中") : Text("待機"))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
         .padding(.bottom, compact ? 7 : 12)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Bot 運行狀態")
-        .accessibilityValue(isActive ? "運行中" : "待機")
+        .accessibilityValue(isActive ? Text("運行中") : Text("待機"))
     }
 }
 
 // MARK: - Section Label
 
 struct SectionLabel: View {
-    let text: String
+    let text: LocalizedStringKey
     var compact: Bool = false
 
-    init(_ text: String, compact: Bool = false) {
+    init(_ text: LocalizedStringKey, compact: Bool = false) {
         self.text = text
         self.compact = compact
     }
@@ -165,24 +165,24 @@ struct GameSummaryDisclosure: View {
             } label: {
                 HStack(spacing: compact ? 10 : 6) {
                     if inGame {
-                        Text(gameState.kyokuDisplayName)
+                        Text(gameState.kyokuDisplayKey)
                             .fontWeight(.semibold)
                         Spacer(minLength: 4)
                         // `jikazeDisplay` 已經含「家」（「北家」），再加「自風」前綴會變成
                         // 「自風 北家」——實測畫面上讀起來是兩個詞疊在一起
-                        Text(gameState.jikazeDisplay)
+                        Text(gameState.jikazeDisplayKey)
                         // 窄版只留局況與自風：190pt 塞四欄會讓每欄縮到讀不了
                         if !compact {
                             Spacer(minLength: 4)
                             Text(myScore).monospacedDigit()
                             Spacer(minLength: 4)
-                            Text(botStatus.modelDisplayName)
+                            Text(botStatus.modelDisplayKey)
                         }
                     } else {
                         Text("未在對局")
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 4)
-                        Text(botStatus.modelDisplayName)
+                        Text(botStatus.modelDisplayKey)
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 4)
@@ -199,7 +199,7 @@ struct GameSummaryDisclosure: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("game-summary-disclosure")
             .accessibilityLabel("牌局與模型資訊")
-            .accessibilityValue(isExpanded ? "已展開" : "已收合")
+            .accessibilityValue(isExpanded ? Text("已展開") : Text("已收合"))
             .accessibilityHint("展開後顯示四家點數、寶牌與模型來源")
 
             // 授權動作常駐在摘要條底下，不再藏進展開層。
@@ -260,10 +260,10 @@ struct GameDetailsPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             group("牌局") {
-                pair("局況", "\(gameState.kyokuDisplayName)・\(gameState.honba) 本場")
-                pair("供託", "\(gameState.riichiBou) 本")
-                pair("我的座位", "Player \(gameState.playerId)・\(gameState.jikazeDisplay)")
-                pair("規則", gameState.is3P ? "三人麻將" : "四人麻將")
+                pair("局況", Text("\(Text(gameState.kyokuDisplayKey))・\(gameState.honba) 本場"))
+                pair("供託", Text("\(gameState.riichiBou) 本"))
+                pair("我的座位", Text("Player \(gameState.playerId)・\(Text(gameState.jikazeDisplayKey))"))
+                pair("規則", gameState.is3P ? Text("三人麻將") : Text("四人麻將"))
             }
 
             ScoreRow(gameState: gameState)
@@ -285,23 +285,23 @@ struct GameDetailsPanel: View {
             // `GameSummaryDisclosure`）。這裡再放一份就是同一份資料出現兩次，
             // 而展開層本來的用途就是收那些「不必每手都看」的東西。
             group("模型與資料來源") {
-                pair("模型", botStatus.modelDisplayName)
-                pair("決策來源", botStatus.decisionSource)
-                pair("推論位置", botStatus.cloudHost ?? "本機 Core ML")
-                pair("雲端狀態", cloudState)
+                pair("模型", Text(botStatus.modelDisplayKey))
+                pair("決策來源", Text(verbatim: botStatus.decisionSource))
+                pair("推論位置", botStatus.cloudHost.map { Text(verbatim: $0) } ?? Text("本機 Core ML"))
+                pair("雲端狀態", Text(cloudState))
             }
         }
         .padding(compact ? 10 : 12)
     }
 
-    private var cloudState: String {
+    private var cloudState: LocalizedStringKey {
         if botStatus.cloudDegraded { return "退化中" }
         if botStatus.cloudHost != nil { return "已連線" }
         return cloudConfigured ? "已設定・未使用" : "未啟用"
     }
 
     @ViewBuilder
-    private func group(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+    private func group(_ title: LocalizedStringKey, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption2)
@@ -311,11 +311,11 @@ struct GameDetailsPanel: View {
         }
     }
 
-    private func pair(_ label: String, _ value: String) -> some View {
+    private func pair(_ label: LocalizedStringKey, _ value: Text) -> some View {
         HStack {
             Text(label).foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            Text(value).fontWeight(.medium)
+            value.fontWeight(.medium)
         }
         .font(.caption)
         .accessibilityElement(children: .combine)
@@ -331,7 +331,7 @@ struct ScoreRow: View {
         HStack(spacing: 5) {
             ForEach(0..<min(gameState.scores.count, gameState.is3P ? 3 : 4), id: \.self) { i in
                 VStack(spacing: 1) {
-                    Text(seatWind(i))
+                    seatWind(i)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Text(gameState.scores[i].formatted(.number))
@@ -344,14 +344,14 @@ struct ScoreRow: View {
                 .background(i == gameState.playerId ? Color.accentColor.opacity(0.16) : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 5))
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(i == gameState.playerId ? "\(seatWind(i))（我）" : seatWind(i))
+                .accessibilityLabel(i == gameState.playerId ? Text("\(seatWind(i))（我）") : seatWind(i))
                 .accessibilityValue("\(gameState.scores[i]) 點")
             }
         }
     }
 
-    private func seatWind(_ i: Int) -> String {
-        SeatWind.name(seat: i, kyoku: gameState.kyoku, is3P: gameState.is3P)
+    private func seatWind(_ i: Int) -> Text {
+        Text(LocalizedStringKey(SeatWind.name(seat: i, kyoku: gameState.kyoku, is3P: gameState.is3P)))
     }
 }
 
@@ -387,8 +387,8 @@ enum SeatWind {
 struct AuthorizedActionsRow: View {
     var botStatus: BotStatus
 
-    private var items: [(String, Bool)] {
-        var list: [(String, Bool)] = [
+    private var items: [(LocalizedStringKey, Bool)] {
+        var list: [(LocalizedStringKey, Bool)] = [
             ("打", botStatus.canDiscard),
             ("立直", botStatus.canRiichi),
             ("吃", botStatus.canChi),
@@ -430,15 +430,15 @@ struct AuthorizedActionsRow: View {
         .accessibilityIdentifier("authorized-actions-row")
     }
 
-    private func badgeRow(_ row: [(String, Bool)]) -> some View {
+    private func badgeRow(_ row: [(LocalizedStringKey, Bool)]) -> some View {
         HStack(spacing: 4) {
-            ForEach(row, id: \.0) { name, available in
-                badge(name: name, available: available)
+            ForEach(Array(row.enumerated()), id: \.offset) { _, item in
+                badge(name: item.0, available: item.1)
             }
         }
     }
 
-    private func badge(name: String, available: Bool) -> some View {
+    private func badge(name: LocalizedStringKey, available: Bool) -> some View {
         Text(name)
             .font(.caption2)
             // 字重是「可用」的非顏色線索之一（另一個是底色深淺）
@@ -453,7 +453,7 @@ struct AuthorizedActionsRow: View {
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(name)
-            .accessibilityValue(available ? "可用" : "不可用")
+            .accessibilityValue(available ? Text("可用") : Text("不可用"))
     }
 }
 
@@ -479,10 +479,10 @@ struct DecisionCard: View {
     /// 因此顯示成「[八筒圖] 8p 40.0%」——牌面已經畫在旁邊，這個 badge 卻又說了
     /// 一次同一張牌，而「要拿它做什麼」反而沒人講。其餘動作的 `displayLabel`
     /// 是對的（吃①／立直／九種九牌），那些要保留。
-    private var actionName: String {
+    private var actionName: LocalizedStringKey {
         recommendation.actionType == .discard
-            ? recommendation.actionType.displayName
-            : recommendation.displayLabel
+            ? recommendation.actionType.displayNameKey
+            : recommendation.displayLabelKey
     }
 
     var body: some View {
@@ -534,7 +534,7 @@ struct DecisionCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("decision-card")
         .accessibilityLabel("最佳選擇")
-        .accessibilityValue("\(recommendation.displayLabel)，\(recommendation.percentageString)")
+        .accessibilityValue(Text("\(Text(recommendation.displayLabelKey))，\(recommendation.percentageString)"))
     }
 }
 
@@ -607,8 +607,8 @@ struct OptionRow: View {
 
             // 與 `DecisionCard.actionName` 同一個理由：打牌的 displayLabel 是牌名
             Text(recommendation.actionType == .discard
-                 ? recommendation.actionType.displayName
-                 : recommendation.displayLabel)
+                 ? recommendation.actionType.displayNameKey
+                 : recommendation.displayLabelKey)
                 .font(.caption2)
                 .fontWeight(.medium)
                 .foregroundStyle(tone)
@@ -692,7 +692,7 @@ struct DecisionAlerts: View {
             || (botStatus.is3P && !botStatus.isCloudDecision)
     }
 
-    private func alert(icon: String, tone: Color, text: String) -> some View {
+    private func alert(icon: String, tone: Color, text: LocalizedStringKey) -> some View {
         HStack(alignment: .top, spacing: 5) {
             Image(systemName: icon).font(.caption2)
             Text(text)

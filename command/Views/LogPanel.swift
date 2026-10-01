@@ -59,7 +59,7 @@ struct LogPanel: View {
                 .toggleStyle(.button)
                 .accessibilityIdentifier("log-autoscroll-toggle")
                 .accessibilityLabel("自動捲動")
-                .accessibilityValue(autoScroll ? "開" : "關")
+                .accessibilityValue(autoScroll ? Text("開") : Text("關"))
                 #if os(macOS)
                 .help("自動滾動到最新")
                 #endif
