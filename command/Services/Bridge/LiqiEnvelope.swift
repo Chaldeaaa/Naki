@@ -97,6 +97,30 @@ nonisolated enum LiqiWire {
         return nil
     }
 
+    /// 解一個可能為負的 int32／int64 varint
+    ///
+    /// 負數在 wire 上固定是 10 bytes 的 64-bit 二補數（`-7700` → `ec c3 ff … 01`），
+    /// `decodeVarint` 為了擋畸形輸入一律拒絕，所以 schema 為 `int32`／`int64` 的欄位（分數）
+    /// 要走這個。第 10 個 byte 只能是 0 或 1（超過 64 bits 就是畸形）。
+    /// 9 bytes 以內的結果與 `decodeVarint` 相同。
+    static func decodeSignedVarint(_ data: Data, offset: Int) -> (value: Int, newOffset: Int)? {
+        var result: UInt64 = 0
+        var pos = offset
+
+        for index in 0..<10 {
+            guard pos < data.count else { return nil }
+            let byte = data[pos]
+            if index == 9 && byte > 1 { return nil }
+            result |= UInt64(byte & 0x7F) << UInt64(index * 7)
+            pos += 1
+            if byte & 0x80 == 0 {
+                return (Int(Int64(bitPattern: result)), pos)
+            }
+        }
+
+        return nil
+    }
+
     /// 編一個 protobuf varint（base-128，little-endian groups）
     ///
     /// - 0 → `[0x00]`、127 → `[0x7f]`、128 → `[0x80, 0x01]`、300 → `[0xac, 0x02]`
@@ -160,7 +184,9 @@ func parseProtobufBlocks(_ data: Data) -> [ProtobufBlock] {
 
         switch wireType {
         case 0: // Varint
-            guard let (_, newOffset) = parseVarint(data, offset: offset) else {
+            // 切 block 只需要長度：用有號版本才跳得過負數欄位的 10 bytes，
+            // 否則同一則訊息後面的欄位會全部丟失。值由各欄位自己決定怎麼解。
+            guard let (_, newOffset) = LiqiWire.decodeSignedVarint(data, offset: offset) else {
                 return blocks
             }
             // 存儲原始 varint 字節（包含正確的編碼）
@@ -219,7 +245,7 @@ enum LiqiEnvelopeDecodeFailure: Error, CustomStringConvertible {
     case tooShort(byteCount: Int)
     /// 第一個 byte 不是 1/2/3
     case unknownType(UInt8, byteCount: Int)
-    /// wrapper 少了 method 或 payload block
+    /// wrapper 少了 method block
     case notEnoughBlocks(type: LiqiMsgType, blocks: Int, byteCount: Int)
     /// field 1 存在但不是合法 UTF-8
     case methodNotUTF8(type: LiqiMsgType, byteCount: Int)
@@ -232,7 +258,7 @@ enum LiqiEnvelopeDecodeFailure: Error, CustomStringConvertible {
             return "未知的訊息類型 \(raw)（\(byteCount) bytes）"
         case let .notEnoughBlocks(type, blocks, byteCount):
             return "\(type) wrapper 只有 \(blocks) 個 block（\(byteCount) bytes），"
-                + "取不到 method/payload"
+                + "取不到 method"
         case let .methodNotUTF8(type, byteCount):
             return "\(type) 的 method 不是合法 UTF-8（\(byteCount) bytes）"
         }
@@ -296,19 +322,17 @@ struct LiqiEnvelope {
             return .success(LiqiEnvelope(type: type, msgId: msgId, method: nil, payload: payload))
         }
 
-        // NOTIFY／REQUEST 這裡**刻意**維持位置取法：method（field 1）在這兩型恆非空，
-        // canonical encoder 不會省略它，兩個 block 的位置序＝欄位序；且 REQUEST 是
-        // Naki 在頁內先看到、任何 proxy 改寫都在其後。若日後出現「notify 被改包工具
-        // 重寫且 payload 全為預設值」的案例，這裡會以 notEnoughBlocks 顯式失敗
-        // （不是 response 那種靜默空 payload），到時再比照 response 改按欄位號取。
-        guard blocks.count >= 2 else {
+        // NOTIFY／REQUEST 同樣按欄位號取：method = field 1（缺席或非 UTF-8 是明確失敗），
+        // payload = field 2（缺席視為空——重新序列化的封包會省略預設值欄位）。
+        guard let methodBlock = blocks.first(where: { $0.fieldId == 1 && $0.wireType == 2 }) else {
             return .failure(.notEnoughBlocks(type: type, blocks: blocks.count, byteCount: body.count))
         }
-        guard let method = blocks[0].stringValue else {
-            return .failure(.methodNotUTF8(type: type, byteCount: blocks[0].data.count))
+        guard let method = methodBlock.stringValue else {
+            return .failure(.methodNotUTF8(type: type, byteCount: methodBlock.data.count))
         }
+        let payload = blocks.first { $0.fieldId == 2 && $0.wireType == 2 }?.data ?? Data()
 
-        return .success(LiqiEnvelope(type: type, msgId: msgId, method: method, payload: blocks[1].data))
+        return .success(LiqiEnvelope(type: type, msgId: msgId, method: method, payload: payload))
     }
 
     // MARK: 編

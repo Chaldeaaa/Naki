@@ -66,7 +66,7 @@ final class LiqiParserFailureTests: XCTestCase {
     }
 
     /// `ActionNewRound`（liqi.json：1=chang, 2=ju, 3=ben, 4=tiles, 6=scores, 8=liqibang）
-    private func newRoundPayload(scores: LiqiField?, tiles: [String] = []) -> [UInt8] {
+    private func newRoundPayload(scores: LiqiField?, tiles: [String] = LiqiParserFailureTests.hand13) -> [UInt8] {
         var fields: [LiqiField] = [
             .varint(field: 1, value: 0),
             .varint(field: 2, value: 0),
@@ -105,6 +105,8 @@ final class LiqiParserFailureTests: XCTestCase {
             ])
         }
     }
+
+    private static let hand13 = ["1m", "2m", "3m", "4m", "5m", "6m", "7m", "8m", "9m", "1p", "2p", "3p", "4p"]
 
     /// 讓 bridge 進入「已知自家座位 0」的狀態（後續 action 測試的前置）
     @discardableResult
@@ -329,6 +331,31 @@ final class LiqiParserFailureTests: XCTestCase {
         XCTAssertNil(state.blocking)
     }
 
+    /// score=0 時 PlayerSnapshot 的 field 1 會被省略（proto3）：缺席 = 0，不得擋局
+    func testGameSnapshotOmittedZeroScoreIsZero() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+        let snapshot = LiqiEncoder.encodeFields([
+            .string(field: 6, value: "1m"),
+            .message(field: 9, fields: [.int(field: 1, value: 28000)]),
+            .message(field: 9, fields: []),
+            .message(field: 9, fields: [.int(field: 1, value: 24000)]),
+            .message(field: 9, fields: [.int(field: 1, value: 22000)])
+        ])
+        let payload = LiqiEncoder.encodeFields([
+            .message(field: 4, fields: [.bytes(field: 1, value: snapshot)])
+        ])
+        let msgId: UInt16 = 78
+        _ = bridge.parse(Data(LiqiEncoder.encodeRequest(method: ".lq.FastTest.syncGame",
+                                                        fields: [], msgId: msgId)))
+        let events = bridge.parse(Data(LiqiEncoder.encodeEnvelope(type: .response, msgId: msgId,
+                                                                  method: "", payload: payload)))
+
+        let start = events?.first { ($0["type"] as? String) == "start_kyoku" }
+        XCTAssertEqual(start?["scores"] as? [Int], [28000, 0, 24000, 22000])
+        XCTAssertNil(state.blocking)
+    }
+
     // MARK: - C. 不可容忍的失敗 → App 進入明確錯誤狀態
 
     /// 壞 frame（authGame 回應沒有 seat_list、也沒有 players）：
@@ -377,6 +404,51 @@ final class LiqiParserFailureTests: XCTestCase {
         XCTAssertNotNil(state.bannerSummary)
     }
 
+    /// 手牌缺或不足 → 不開局（自家手牌是空的，推薦是拿殘缺手牌推的）
+    func testNewRoundWithMissingOrShortTilesBlocks() {
+        for tiles in [[], Array(Self.hand13.prefix(5))] {
+            let (bridge, state) = makeBridge()
+            authenticate(bridge)
+            let events = bridge.parse(actionPrototypeFrame(
+                name: "ActionNewRound",
+                data: newRoundPayload(scores: .bytes(field: 6, value: packed([25000, 25000, 25000, 25000])),
+                                      tiles: tiles)))
+
+            XCTAssertNil(events?.first { ($0["type"] as? String) == "start_kyoku" }, "tiles=\(tiles.count)")
+            XCTAssertEqual(state.blocking?.site, "ActionNewRound.tiles")
+        }
+    }
+
+    func testNewRoundWithFullHandStillStarts() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+        let events = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: packed([25000, 25000, 25000, 25000])),
+                                  tiles: Self.hand13 + ["5p"])))
+
+        XCTAssertNotNil(events?.first { ($0["type"] as? String) == "start_kyoku" })
+        XCTAssertNil(state.blocking)
+    }
+
+    /// 重連快照沒有手牌 → 不開局
+    func testGameSnapshotWithoutTilesBlocks() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+        let snapshot = LiqiEncoder.encodeFields((0..<4).map { _ in
+            .message(field: 9, fields: [.int(field: 1, value: 25000)])
+        })
+        let payload = LiqiEncoder.encodeFields([.message(field: 4, fields: [.bytes(field: 1, value: snapshot)])])
+        let msgId: UInt16 = 79
+        _ = bridge.parse(Data(LiqiEncoder.encodeRequest(method: ".lq.FastTest.syncGame",
+                                                        fields: [], msgId: msgId)))
+        let events = bridge.parse(Data(LiqiEncoder.encodeEnvelope(type: .response, msgId: msgId,
+                                                                  method: "", payload: payload)))
+
+        XCTAssertNil(events?.first { ($0["type"] as? String) == "start_kyoku" })
+        XCTAssertEqual(state.blocking?.site, "GameSnapshot.tiles")
+    }
+
     /// blocking 是可恢復的：下一局解析成功就收掉橫幅（否則錯誤會永遠掛著）。
     func testBlockingStateClearsOnNextHealthyRound() {
         let (bridge, state) = makeBridge()
@@ -388,7 +460,8 @@ final class LiqiParserFailureTests: XCTestCase {
 
         _ = bridge.parse(actionPrototypeFrame(name: "ActionNewRound",
                                               data: newRoundPayload(scores: .bytes(field: 6,
-                                                                                   value: packed([25000, 25000, 25000, 25000])))))
+                                                                                   value: packed([25000, 25000, 25000, 25000])),
+                                                                    tiles: Self.hand13)))
         XCTAssertNil(state.blocking, "解析恢復正常後橫幅要消失")
         XCTAssertFalse(state.recent.isEmpty, "但曾經失敗過要查得到")
     }
@@ -406,7 +479,8 @@ final class LiqiParserFailureTests: XCTestCase {
         // 之後來一個分數完全正常的 ActionNewRound
         _ = bridge.parse(actionPrototypeFrame(name: "ActionNewRound",
                                               data: newRoundPayload(scores: .bytes(field: 6,
-                                                                                   value: packed([25000, 25000, 25000, 25000])))))
+                                                                                   value: packed([25000, 25000, 25000, 25000])),
+                                                                    tiles: Self.hand13)))
 
         // 座位那個前提還沒解決，橫幅必須留著
         XCTAssertEqual(state.blocking?.site, "ResAuthGame.seat_list",
@@ -673,5 +747,255 @@ final class LiqiParserFailureTests: XCTestCase {
         let dahai = events?.first { ($0["type"] as? String) == "dahai" }
         XCTAssertEqual(dahai?["actor"] as? Int, 3)
         XCTAssertEqual(dahai?["pai"] as? String, "7p")
+    }
+
+    // MARK: - 負分（int32 在 wire 上是 10 bytes）
+
+    /// live 事故：有人負分時整個 scores 解不出來 → 不發 start_kyoku
+    func testNegativeScoresInNewRoundAreParsedAndStartKyokuEmitted() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+
+        let signed = [25000, -3000, 27000, 51000].flatMap {
+            LiqiEncoder.encodeVarint(UInt64(bitPattern: Int64($0)))
+        }
+        let events = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: signed))))
+
+        let startKyoku = events?.first { ($0["type"] as? String) == "start_kyoku" }
+        XCTAssertEqual(startKyoku?["scores"] as? [Int], [25000, -3000, 27000, 51000])
+        XCTAssertNil(state.blocking)
+        XCTAssertEqual(state.totalCount, 0)
+    }
+
+    func testNegativeNonPackedScoresAreAccumulated() {
+        let parser = LiqiParser()
+        let fields: [LiqiField] = [
+            .varint(field: 1, value: 0), .varint(field: 2, value: 0),
+            .int(field: 6, value: 25000), .int(field: 6, value: -100),
+            .int(field: 6, value: 24000), .int(field: 6, value: 25000)
+        ]
+        let frame = actionPrototypeFrame(name: "ActionNewRound", data: LiqiEncoder.encodeFields(fields))
+
+        let action = (parser.parse(frame)?["data"] as? [String: Any])?["data"] as? [String: Any]
+
+        XCTAssertEqual(action?["scores"] as? [Int], [25000, -100, 24000, 25000])
+        XCTAssertTrue(parser.faults.isEmpty)
+    }
+
+    /// live bytes：`ActionHule.delta_scores` = [0, -7700, 0, 7700]，不得記 fault
+    func testHuleDeltaScoresWithNegativeDecodeWithoutFault() {
+        let parser = LiqiParser()
+        let delta: [UInt8] = [0x00, 0xec, 0xc3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+                              0x00, 0x94, 0x3c]
+        let frame = actionPrototypeFrame(name: "ActionHule", data: LiqiEncoder.encodeFields([
+            .bytes(field: 3, value: delta),
+            .bytes(field: 5, value: [UInt8](LiqiEncoder.encodeVarint(UInt64(bitPattern: -500))))
+        ]))
+
+        let action = (parser.parse(frame)?["data"] as? [String: Any])?["data"] as? [String: Any]
+
+        XCTAssertEqual(action?["deltaScores"] as? [Int], [0, -7700, 0, 7700])
+        XCTAssertEqual(action?["scores"] as? [Int], [-500])
+        XCTAssertTrue(parser.faults.isEmpty, "\(parser.faults)")
+    }
+
+    /// 無號欄位（seat_list）仍不接受負數的 10-byte 編碼
+    func testUnsignedRepeatedFieldStillRejectsTenByteVarint() {
+        let (bridge, state) = makeBridge()
+        let negative = LiqiEncoder.encodeVarint(UInt64(bitPattern: -1))
+        _ = bridge.parse(authGameRequest(msgId: 41))
+        _ = bridge.parse(authGameResponse(msgId: 41, fields: [.bytes(field: 3, value: negative)]))
+
+        XCTAssertNotNil(state.blocking)
+    }
+
+    // MARK: - start_kyoku 被擋之後不再餵舊牌況
+
+    private func startsRound(_ bridge: MajsoulBridge) -> [[String: Any]]? {
+        bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: packed([25000, 25000, 25000, 25000])))))
+    }
+
+    private func discardFrame(seat: Int, tile: String, extra: [LiqiField] = []) -> Data {
+        actionPrototypeFrame(name: "ActionDiscardTile", data: LiqiEncoder.encodeFields([
+            .varint(field: 1, value: UInt64(seat)),
+            .string(field: 2, value: tile)
+        ] + extra))
+    }
+
+    func testEventsAreDroppedWhileStartKyokuIsBlockedUntilNextHealthyRound() {
+        let (bridge, _) = makeBridge()
+        authenticate(bridge)
+        _ = startsRound(bridge)
+
+        // 壞分數 → 這局沒開起來
+        _ = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: [0xff, 0xff]))))
+
+        XCTAssertNil(bridge.parse(discardFrame(seat: 1, tile: "5p")),
+                     "start_kyoku 被擋時 bot 手上是上一局，不得再餵牌局內事件")
+        let endEvents = bridge.parse(actionPrototypeFrame(name: "ActionHule", data: []))
+        XCTAssertEqual(endEvents?.compactMap { $0["type"] as? String }, ["end_kyoku"],
+                       "end_kyoku 是協調器的流程控制事件，擋局期間也要發")
+
+        let events = startsRound(bridge)
+        XCTAssertNotNil(events?.first { ($0["type"] as? String) == "start_kyoku" })
+        XCTAssertNotNil(bridge.parse(discardFrame(seat: 1, tile: "5p")), "下一次成功開局後恢復")
+    }
+
+    /// 被擋的局裡自家送出的動作（例如 forceHora）被伺服器廣播回來時，回音仍要登記
+    func testSelfActionEchoRecordedWhileStartKyokuIsBlocked() {
+        let (bridge, _) = makeBridge()
+        authenticate(bridge)
+        _ = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: [0xff, 0xff]))))
+        let before = SelfActionEchoTracker.shared.count
+
+        XCTAssertNil(bridge.parse(discardFrame(seat: 0, tile: "5p")), "事件本身仍丟棄")
+
+        XCTAssertEqual(SelfActionEchoTracker.shared.count, before + 1)
+    }
+
+    func testOplistStillRecordedWhileStartKyokuIsBlocked() {
+        let (bridge, _) = makeBridge()
+        authenticate(bridge)
+        LiqiOperationStore.shared.clear()
+        _ = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: [0xff, 0xff]))))
+
+        _ = bridge.parse(discardFrame(seat: 1, tile: "5p", extra: [.message(field: 4, fields: [
+            .varint(field: 1, value: 0),
+            .message(field: 2, fields: [.varint(field: 1, value: 9)])
+        ])]))
+
+        XCTAssertNotNil(LiqiOperationStore.shared.latest, "伺服器授權的操作仍要能經 oplist 送出")
+        LiqiOperationStore.shared.clear()
+    }
+
+    // MARK: - int32 範圍
+
+    private func newRoundEvents(scoreValues: [Int64]) -> (events: [[String: Any]]?, state: LiqiParseFaultState) {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+        let bytes = scoreValues.flatMap { LiqiEncoder.encodeVarint(UInt64(bitPattern: $0)) }
+        let events = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: bytes))))
+        return (events, state)
+    }
+
+    /// 超出 int32 的分數會讓下游 `-= 1000` 溢位 trap：視為解析失敗、不開這一局
+    func testScoresOutsideInt32BlockTheRound() {
+        for bad in [Int64(Int32.max) + 1, Int64(Int32.min) - 1, Int64.max, Int64.min] {
+            let (events, state) = newRoundEvents(scoreValues: [25000, 25000, 25000, bad])
+            XCTAssertNil(events?.first { ($0["type"] as? String) == "start_kyoku" }, "bad=\(bad)")
+            XCTAssertNotNil(state.blocking, "bad=\(bad)")
+        }
+    }
+
+    func testScoresAtInt32BoundsAreAccepted() {
+        let (events, state) = newRoundEvents(scoreValues: [Int64(Int32.max), Int64(Int32.min), 0, 0])
+        XCTAssertNotNil(events?.first { ($0["type"] as? String) == "start_kyoku" })
+        XCTAssertNil(state.blocking)
+    }
+
+    func testNonPackedScoreOutsideInt32IsFault() {
+        let parser = LiqiParser()
+        let fields: [LiqiField] = [
+            .int(field: 6, value: 25000), .int(field: 6, value: Int(Int32.max) + 1)
+        ]
+        _ = parser.parse(actionPrototypeFrame(name: "ActionNewRound", data: LiqiEncoder.encodeFields(fields)))
+        XCTAssertTrue(parser.faults.contains { $0.site == "ActionNewRound.scores" }, "\(parser.faults)")
+    }
+
+    // MARK: - proto3 省略預設值
+
+    /// 代理重新序列化會省略值為 0 的欄位（chang=0 東場、ju=0 東一局）：缺席要解讀成 0
+    func testNewRoundWithOmittedChangAndJuStartsEastOne() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+        let payload = LiqiEncoder.encodeFields(
+            Self.hand13.map { .string(field: 4, value: $0) }
+                + [.bytes(field: 6, value: packed([25000, 25000, 25000, 25000]))])
+        let events = bridge.parse(actionPrototypeFrame(name: "ActionNewRound", data: payload))
+
+        let start = events?.first { ($0["type"] as? String) == "start_kyoku" }
+        XCTAssertEqual(start?["bakaze"] as? String, "E")
+        XCTAssertEqual(start?["kyoku"] as? Int, 1)
+        XCTAssertNil(state.blocking)
+    }
+
+    /// 欄位存在但型別錯（length-delimited）才算失敗
+    func testNewRoundWithWrongTypeChangBlocks() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+        let payload = LiqiEncoder.encodeFields([
+            .bytes(field: 1, value: [0x01]),
+            .bytes(field: 6, value: packed([25000, 25000, 25000, 25000]))
+        ])
+        let events = bridge.parse(actionPrototypeFrame(name: "ActionNewRound", data: payload))
+        XCTAssertNil(events?.first { ($0["type"] as? String) == "start_kyoku" })
+        XCTAssertNotNil(state.blocking)
+    }
+
+    // MARK: - 人數與分數個數一致
+
+    func testThreeScoresInFourPlayerGameBlocks() {
+        let (bridge, state) = makeBridge()
+        authenticate(bridge)
+
+        let events = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: packed([35000, 35000, 35000])))))
+
+        XCTAssertNil(events?.first { ($0["type"] as? String) == "start_kyoku" })
+        XCTAssertEqual(state.blocking?.site, "ActionNewRound.scores")
+    }
+
+    func testThreePlayerGameAcceptsThreeScoresAndPadsToFour() {
+        let (bridge, state) = makeBridge()
+        _ = bridge.parse(authGameRequest(msgId: 41))
+        _ = bridge.parse(authGameResponse(msgId: 41, fields: [
+            .bytes(field: 3, value: packed([accountId, 2, 3]))
+        ]))
+
+        let events = bridge.parse(actionPrototypeFrame(
+            name: "ActionNewRound",
+            data: newRoundPayload(scores: .bytes(field: 6, value: packed([35000, 35000, 35000])))))
+
+        let startKyoku = events?.first { ($0["type"] as? String) == "start_kyoku" }
+        XCTAssertEqual(startKyoku?["scores"] as? [Int], [35000, 35000, 35000, 0])
+        XCTAssertNil(state.blocking)
+    }
+
+    // MARK: - W 立直、多張寶牌
+
+    func testWLiqiEmitsReach() {
+        let (bridge, _) = makeBridge()
+        authenticate(bridge)
+        _ = startsRound(bridge)
+
+        let events = bridge.parse(discardFrame(seat: 1, tile: "5p", extra: [.bool(field: 9, value: true)]))
+
+        XCTAssertEqual(events?.compactMap { $0["type"] as? String }, ["reach", "dahai"])
+    }
+
+    func testMultipleNewDorasEachEmitOneEvent() {
+        let (bridge, _) = makeBridge()
+        authenticate(bridge)
+        _ = startsRound(bridge)
+
+        let events = bridge.parse(discardFrame(seat: 1, tile: "5p", extra: [
+            .string(field: 8, value: "1m"), .string(field: 8, value: "2m"), .string(field: 8, value: "3m")
+        ]))
+
+        let doras = events?.filter { ($0["type"] as? String) == "dora" }.compactMap { $0["dora_marker"] as? String }
+        XCTAssertEqual(doras, ["1m", "2m", "3m"], "一次翻三張要各發一個，且保持順序")
     }
 }

@@ -106,7 +106,7 @@ final class LiqiActionSender {
             return result
         }
 
-        logHandler?("[Liqi] → \(spec.method) msgId=\(msgId) bytes=\(bytes.count) payload=\(LiqiEncoder.hexString(spec.payload))")
+        logHandler?("[Liqi] → \(spec.method) msgId=\(msgId) bytes=\(bytes.count) \(Self.loggablePayload(spec))")
 
         let raw = await sendHandler(base64)
         let result = LiqiSendResult(method: spec.method, msgId: msgId,
@@ -115,6 +115,14 @@ final class LiqiActionSender {
         lastResult = result
         logHandler?("[Liqi] \(result.logLine)")
         return result
+    }
+
+    /// 憑證類請求（見 `LiqiCredentialMethods`）只記長度：
+    /// payload 會進 `all.log`、`/logs` 與狀態列
+    static func loggablePayload(_ spec: LiqiRequestSpec) -> String {
+        LiqiCredentialMethods.matches(spec.method)
+            ? "payload=<redacted \(spec.payload.count) bytes>"
+            : "payload=\(LiqiEncoder.hexString(spec.payload))"
     }
 
     // MARK: - ② 動作層 API
@@ -188,7 +196,8 @@ final class LiqiActionSender {
     /// - Parameter intervalSeconds: 送出間隔，下限 30 秒（避免打太頻繁）
     func setAntiIdle(enabled: Bool, intervalSeconds: TimeInterval? = nil) {
         if let intervalSeconds {
-            antiIdleInterval = max(30, intervalSeconds)
+            // 上限避免 `intervalSeconds` 極端值讓 `Int(antiIdleInterval)` trap
+            antiIdleInterval = min(max(30, intervalSeconds), 86_400)
         }
         antiIdleEnabled = enabled
 

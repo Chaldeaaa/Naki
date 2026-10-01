@@ -49,6 +49,24 @@ final class LiqiErrorCodeTests: XCTestCase {
         XCTAssertNil(r.errorDescription)
     }
 
+    /// error 不在 field 1 的 Res：field 1 是資料欄位，不能被當成錯誤
+    func testHasErrorFollowsPerMethodErrorField() {
+        func rec(_ method: String, _ fields: [String: Any]) -> LiqiResponseRecord {
+            LiqiResponseRecord(msgId: 60001, method: method, fields: fields, receivedAt: Date())
+        }
+        // ResServerTime: server_time = 1, error = 2
+        XCTAssertFalse(rec(".lq.Lobby.fetchServerTime", ["field1": 1_700_000_000]).hasError)
+        XCTAssertTrue(rec(".lq.Lobby.fetchServerTime", ["field2": b64([0x08, 0x01])]).hasError)
+        XCTAssertEqual(rec(".lq.Lobby.fetchServerTime", ["field2": "COwH"]).errorCode, 1004)
+        // ResGameEndVote: success = 1, error = 3
+        XCTAssertFalse(rec(".lq.FastTest.voteGameEnd", ["field1": 1]).hasError)
+        XCTAssertTrue(rec(".lq.FastTest.voteGameEnd", ["field3": "COwH"]).hasError)
+        // 沒有 error 欄位的 Res 一律非錯誤
+        XCTAssertFalse(rec(".lq.FastTest.startObserve", ["field1": "AA=="]).hasError)
+        // 不在表內的方法維持 field 1
+        XCTAssertTrue(rec(".lq.Lobby.matchGame", ["field1": "COwH"]).hasError)
+    }
+
     /// 壞資料不能當掉，也不能亂猜出一個碼
     func testMalformedDataYieldsNil() {
         XCTAssertNil(record(field1: "").errorCode)

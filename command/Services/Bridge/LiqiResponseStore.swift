@@ -11,7 +11,7 @@
 //
 //  本檔把兩類「丟棄掉但有用」的訊息接住：
 //
-//    1. type=3 且 msgId 落在 Naki 號段（60000+）→ 這是**我們自己送出的請求**的回應。
+//    1. type=3 且 msgId 是 `LiqiMsgIdAllocator` 配發過、尚未認領的 → 這是**我們自己送出的請求**的回應。
 //       LiqiParser 用 `pendingRequests[msgId]` 配對方法名，所以連方法名都有。
 //    2. `.lq.NotifyGameBroadcast` → 表情廣播（seat + content）。
 //
@@ -41,10 +41,42 @@ nonisolated struct LiqiResponseRecord {
     /// 收到時間
     let receivedAt: Date
 
-    /// 所有雀魂 `Res*` 的 field 1 都是 `Error error`；出現代表伺服器拒絕了這個請求。
-    var hasError: Bool { fields["field1"] != nil }
+    /// `Error error` 不在 field 1 的 Res（取自 liqi.json 的 `Res*` 定義）。0 = 該 Res 沒有 error 欄位。
+    /// 不在表內的方法一律視為 field 1（`ResCommon` 等絕大多數）。
+    static let errorFieldNumbers: [String: Int] = [
+        ".lq.Lobby.fetchServerMaintenanceInfo": 0,
+        ".lq.FastTest.startObserve": 0,
+        ".lq.Lobby.dmmPreLogin": 2,
+        ".lq.Lobby.fetchAccountCharacterInfo": 2,
+        ".lq.Lobby.fetchAchievementRate": 2,
+        ".lq.Lobby.fetchClientValue": 3,
+        ".lq.Lobby.fetchRollingNotice": 2,
+        ".lq.Lobby.fetchServerTime": 2,
+        ".lq.Lobby.fetchCommonViews": 2,
+        ".lq.Lobby.fetchAllCommonViews": 3,
+        ".lq.Lobby.fetchMonthTicketInfo": 2,
+        ".lq.Lobby.fetchServerSettings": 2,
+        ".lq.Lobby.fetchModNicknameTime": 2,
+        ".lq.Lobby.receiveActivityFlipTask": 2,
+        ".lq.Lobby.fetchActivityFlipInfo": 3,
+        ".lq.Lobby.richmanActivityNextMove": 11,
+        ".lq.Lobby.richmanAcitivitySpecialMove": 11,
+        ".lq.Lobby.richmanActivityChestInfo": 2,
+        ".lq.Lobby.fetchChallengeSeason": 2,
+        ".lq.Lobby.receiveChallengeRankReward": 2,
+        ".lq.FastTest.voteGameEnd": 3
+    ]
 
-    /// 伺服器回的錯誤碼（`Error.code`，field 1 的 varint）
+    /// 這個回應的 `Error error` 欄位 key（沒有 error 欄位回 nil）
+    private var errorFieldKey: String? {
+        let number = Self.errorFieldNumbers[method] ?? 1
+        return number == 0 ? nil : "field\(number)"
+    }
+
+    /// 該方法的 error 欄位出現，代表伺服器拒絕了這個請求。
+    var hasError: Bool { errorFieldKey.map { fields[$0] != nil } ?? false }
+
+    /// 伺服器回的錯誤碼（`Error.code`，Error 訊息內 field 1 的 varint）
     ///
     /// 通用解析把巢狀 message 轉成 base64，所以這裡要自己解一層。
     /// 不解的話，每次排查都要人工 base64 → hex → varint——2026-08-01 那輪
@@ -54,7 +86,8 @@ nonisolated struct LiqiResponseRecord {
     /// varint 一律走 `LiqiWire.decodeVarint`（全專案唯一一份），不要在這裡自己寫迴圈：
     /// 兩份實作的溢位上限會漂開。
     var errorCode: Int? {
-        guard let b64 = fields["field1"] as? String,
+        guard let key = errorFieldKey,
+              let b64 = fields[key] as? String,
               let data = Data(base64Encoded: b64),
               data.count >= 2,
               data[0] == 0x08                      // field 1, wire type 0 (varint)
@@ -137,9 +170,6 @@ nonisolated final class LiqiResponseStore: @unchecked Sendable {
     /// 全域共用實例
     static let shared = LiqiResponseStore()
 
-    /// 只接住 msgId >= 這個值的回應（Naki 注入號段；遊戲自己用低位遞增號）
-    static let nakiMsgIdFloor = Int(LiqiMsgIdAllocator.rangeStart)
-
     /// 表情廣播的方法全名
     static let broadcastMethod = ".lq.NotifyGameBroadcast"
 
@@ -153,7 +183,12 @@ nonisolated final class LiqiResponseStore: @unchecked Sendable {
     private var responseOrder: [Int] = []
     private var broadcastBuffer: [LiqiBroadcastRecord] = []
 
-    init() {}
+    /// 判定「這是我們自己送的」的登記來源（測試可注入獨立配發器）
+    private let allocator: LiqiMsgIdAllocator
+
+    init(allocator: LiqiMsgIdAllocator = .shared) {
+        self.allocator = allocator
+    }
 
     // MARK: - 寫入
 
@@ -167,7 +202,7 @@ nonisolated final class LiqiResponseStore: @unchecked Sendable {
         let data = parsed["data"] as? [String: Any] ?? [:]
 
         if type == "response", let msgId = parsed["id"] as? Int,
-           msgId >= LiqiResponseStore.nakiMsgIdFloor {
+           let id16 = UInt16(exactly: msgId), allocator.claim(id16) {
             recordResponse(msgId: msgId, method: method, fields: data)
             return true
         }
@@ -277,7 +312,8 @@ nonisolated final class LiqiResponseStore: @unchecked Sendable {
             return nil
         }
         if let value = json["emo"] as? Int { return value }
-        if let value = json["emo"] as? Double { return Int(value) }
+        // 非整數或超界的 Double 直接放棄（`Int(_:)` 超界會 trap）
+        if let value = json["emo"] as? Double { return Int(exactly: value) }
         return nil
     }
 }

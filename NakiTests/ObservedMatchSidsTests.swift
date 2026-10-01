@@ -16,17 +16,43 @@ import XCTest
 
 @testable import Naki
 
+/// `.shared` 走 `UserDefaults.standard`，而 test host 與正式 App 共用那份偏好設定。
+/// 無法注入 store 的測試（parser 只寫 `.shared`）改在前後存下／還原該 key，
+/// 不讓 `reset()` 或測試寫入洗掉正式 App 已學到的 sid。
+@MainActor
+func isolateSharedObservedMatchSids(_ testCase: XCTestCase) {
+    let saved = UserDefaults.standard.data(forKey: ObservedMatchSids.storageKey)
+    ObservedMatchSids.shared.reset()
+    testCase.addTeardownBlock { @MainActor in
+        ObservedMatchSids.shared.reset()
+        if let saved { UserDefaults.standard.set(saved, forKey: ObservedMatchSids.storageKey) }
+    }
+}
+
 final class ObservedMatchSidsTests: XCTestCase {
+
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+    private var store: ObservedMatchSids!
 
     @MainActor
     override func setUp() {
         super.setUp()
-        ObservedMatchSids.shared.reset()
+        suiteName = "naki.tests.sids.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+        store = ObservedMatchSids.makeForTesting(defaults: defaults)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        store = nil
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
     }
 
     @MainActor
     func testRecordsObservation() {
-        let store = ObservedMatchSids.shared
         store.record(sid: "sid-abc", clientVersionString: "web-4.0.45")
         XCTAssertEqual(store.knownSids, ["sid-abc"])
         XCTAssertEqual(store.observations.count, 1)
@@ -36,7 +62,6 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// 同一組重複出現要累加，不是塞出一堆重複紀錄
     @MainActor
     func testRepeatedObservationIncrementsCount() {
-        let store = ObservedMatchSids.shared
         for _ in 0..<4 { store.record(sid: "sid-abc", clientVersionString: "web-4.0.45") }
         XCTAssertEqual(store.observations.count, 1)
         XCTAssertEqual(store.observations[0].count, 4)
@@ -45,7 +70,6 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// 同一個 sid 但版本字串不同要分開記：送出時兩個欄位是一組的
     @MainActor
     func testDifferentVersionRecordedSeparately() {
-        let store = ObservedMatchSids.shared
         store.record(sid: "sid-abc", clientVersionString: "web-4.0.45")
         store.record(sid: "sid-abc", clientVersionString: "web-4.0.46")
         XCTAssertEqual(store.observations.count, 2)
@@ -54,7 +78,6 @@ final class ObservedMatchSidsTests: XCTestCase {
 
     @MainActor
     func testEmptySidIsIgnored() {
-        let store = ObservedMatchSids.shared
         store.record(sid: "", clientVersionString: "web-4.0.45")
         XCTAssertTrue(store.observations.isEmpty)
     }
@@ -62,7 +85,7 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// 沒有觀察時必須說「還沒觀察到」，不能回一個猜的 sid
     @MainActor
     func testEmptyStateSaysSo() {
-        let d = ObservedMatchSids.shared.dictionary
+        let d = store.dictionary
         XCTAssertEqual((d["knownSids"] as? [String])?.isEmpty, true)
         XCTAssertTrue((d["note"] as? String)?.contains("還沒觀察到") == true)
         XCTAssertNil(d["latest"])
@@ -71,7 +94,6 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// `latest` 是 `lobby_start_unified_match` 不帶參數時的唯一預設來源
     @MainActor
     func testLatestReturnsMostRecent() {
-        let store = ObservedMatchSids.shared
         store.record(sid: "old", clientVersionString: "v1")
         store.record(sid: "new", clientVersionString: "v2")
         XCTAssertEqual(store.latest?.sid, "new")
@@ -81,7 +103,6 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// 不得宣稱 sid 對應哪個場次——猜錯會把人送進錯的段位場
     @MainActor
     func testDoesNotClaimRoomMapping() {
-        let store = ObservedMatchSids.shared
         store.record(sid: "sid-abc", clientVersionString: "v1")
         let note = (store.dictionary["note"] as? String) ?? ""
         XCTAssertTrue(note.contains("不宣稱"))
@@ -116,6 +137,11 @@ final class ObservedMatchSidsTests: XCTestCase {
         let spec = LiqiRequestBuilder.startUnifiedMatch(matchSid: "")
         XCTAssertTrue(spec.payload.isEmpty)
     }
+}
+
+// MARK: - Parser 只寫 `.shared`（無法注入）
+
+final class ObservedMatchSidsParserTests: XCTestCase {
 
     // MARK: - 只學遊戲自己送的
 
@@ -126,7 +152,7 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// 正是拿這份資料當預設，等於讓錯誤自我餵養。
     @MainActor
     func testDoesNotLearnFromNakiOwnRequest() async {
-        ObservedMatchSids.shared.reset()
+        isolateSharedObservedMatchSids(self)
         let parser = LiqiParser()
         let spec = LiqiRequestBuilder.startUnifiedMatch(matchSid: "naki-guess")
 
@@ -143,7 +169,7 @@ final class ObservedMatchSidsTests: XCTestCase {
     /// 遊戲自己送的（低位遞增 msgId）才是真憑據
     @MainActor
     func testLearnsFromGameRequest() async {
-        ObservedMatchSids.shared.reset()
+        isolateSharedObservedMatchSids(self)
         let parser = LiqiParser()
         let spec = LiqiRequestBuilder.startUnifiedMatch(
             matchSid: "real-sid", clientVersionString: "0.11.252.w")
@@ -155,5 +181,51 @@ final class ObservedMatchSidsTests: XCTestCase {
 
         XCTAssertEqual(ObservedMatchSids.shared.latest?.sid, "real-sid")
         XCTAssertEqual(ObservedMatchSids.shared.latest?.clientVersionString, "0.11.252.w")
+    }
+
+    // MARK: - 取消匹配與 seenAt（獨立 UserDefaults，不碰 .standard／.shared）
+
+    @MainActor
+    private func makeIsolatedStore(_ name: String) -> ObservedMatchSids {
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return ObservedMatchSids.makeForTesting(defaults: defaults)
+    }
+
+    /// 取消匹配後開出的友人房不得被回填成該 sid 的人數
+    @MainActor
+    func testCancelClearsAwaitingGameKind() {
+        let store = makeIsolatedStore("naki.test.sids.cancel")
+        store.record(sid: "ranked", clientVersionString: "v1")
+
+        store.cancelAwaitingGameKind()
+        store.gameDidStart(is3P: true)
+
+        XCTAssertNil(store.observations[0].is3P)
+    }
+
+    @MainActor
+    func testWithoutCancelGameStartBackfillsKind() {
+        let store = makeIsolatedStore("naki.test.sids.backfill")
+        store.record(sid: "ranked", clientVersionString: "v1")
+
+        store.gameDidStart(is3P: true)
+
+        XCTAssertEqual(store.observations[0].is3P, true)
+    }
+
+    /// 重複觀察舊的 sid 要讓它變成 `latest`
+    @MainActor
+    func testReobservingUpdatesSeenAtSoLatestIsMostRecentlyPlayed() {
+        let store = makeIsolatedStore("naki.test.sids.latest")
+        store.record(sid: "a", clientVersionString: "v1")
+        Thread.sleep(forTimeInterval: 0.01)
+        store.record(sid: "b", clientVersionString: "v1")
+        Thread.sleep(forTimeInterval: 0.01)
+        store.record(sid: "a", clientVersionString: "v1")
+
+        XCTAssertEqual(store.latest?.sid, "a")
+        XCTAssertEqual(store.observations.count, 2)
     }
 }

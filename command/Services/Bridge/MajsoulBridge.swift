@@ -76,6 +76,13 @@ class MajsoulBridge {
     /// 是否已收到過 authGame（用於判斷是否需要發送 start_game）
     private var hasReceivedAuthGame: Bool = false
 
+    /// 本局的 start_kyoku 被 blocking fault 擋下。
+    ///
+    /// 此時 bot 還留著**上一局**的狀態；後續牌局內事件照常轉給它，推薦就是拿舊牌況推出來的，
+    /// 畫面上看起來完全正常。所以擋住期間不發牌局內事件，直到下一次 start_kyoku／start_game
+    /// 成功。oplist 不受影響（伺服器授權的和牌仍要能送出）。
+    private var roundBlocked = false
+
     // MARK: - Public Methods
 
     /// 重置橋接器狀態（保留 accountId 與 seat／is3P）
@@ -96,6 +103,7 @@ class MajsoulBridge {
         pendingReachAccepted = nil
         syncing = false
         hasReceivedAuthGame = false
+        roundBlocked = false
         LiqiOperationStore.shared.clear()
         bridgeLog("[MajsoulBridge] 重置 (accountId 已保留: \(accountId), seat 已保留: \(seat))")
     }
@@ -111,6 +119,7 @@ class MajsoulBridge {
         pendingReachAccepted = nil
         syncing = false
         hasReceivedAuthGame = false
+        roundBlocked = false
         LiqiOperationStore.shared.clear()
         LiqiResponseStore.shared.reset()
         // 頁面重新載入＝重新開始：上一次載入留下的解析失敗不該掛在新頁面上
@@ -282,6 +291,7 @@ class MajsoulBridge {
             doras = []
             is3P = false
             pendingReachAccepted = nil
+            roundBlocked = false
 
             // 從請求中獲取 accountId
             if let accId = msgData["accountId"] as? Int, accId > 0 {
@@ -330,6 +340,7 @@ class MajsoulBridge {
                     }
 
                     // 帶上三麻旗標（bridge 由 seatList.count 判斷），供下游建立對應 bot
+                    roundBlocked = false
                     results.append([
                         "type": "start_game",
                         "id": seat,
@@ -484,14 +495,26 @@ class MajsoulBridge {
         }
 
         // 處理寶牌
+        // 一次可能翻多張（例如連槓），每張各發一個 dora 事件
         if let doraList = data["doras"] as? [String], doraList.count > doras.count {
-            if let newDora = doraList.last,
-               let mjaiTile = LiqiTile.mjai(fromMajsoul: newDora) {
+            for newDora in doraList.dropFirst(doras.count) {
+                guard let mjaiTile = LiqiTile.mjai(fromMajsoul: newDora) else { continue }
                 results.append([
                     "type": "dora",
                     "dora_marker": mjaiTile
                 ])
-                doras = doraList
+            }
+            doras = doraList
+        }
+
+        // start_kyoku 被擋住：bot 手上是上一局的牌況，這批牌局內事件一律不發
+        // `end_kyoku` 不丟：協調器靠它推進流程（沒有它全自動會卡在結算畫面），
+        // 沒有對應 start_kyoku 的 end_kyoku 下游 bot 也不會出錯。
+        let produced = results
+        if roundBlocked {
+            results.removeAll { $0["type"] as? String != "end_kyoku" }
+            if results.count != produced.count {
+                bridgeLog("[MajsoulBridge] 本局 start_kyoku 被擋，丟棄 \(produced.count - results.count) 個 \(name) 事件")
             }
         }
 
@@ -504,7 +527,8 @@ class MajsoulBridge {
         }
 
         // 送出層第 3 層驗證的事實來源（見 `SelfActionEchoTracker`）
-        for event in results {
+        // 用丟棄前的事件登記：被擋的局裡自家送出的動作（forceHora 等）仍要有回音
+        for event in produced {
             guard let type = event["type"] as? String,
                   SelfActionEchoTracker.isEcho(type: type,
                                                actor: event["actor"] as? Int,
@@ -581,11 +605,9 @@ class MajsoulBridge {
 
         bridgeLog("[MajsoulBridge] parseNewRound 調用, 資料鍵: \(data.keys)")
 
-        guard let chang = data["chang"] as? Int,
-              let ju = data["ju"] as? Int else {
-            bridgeLog("[MajsoulBridge] parseNewRound: 缺少 chang 或 ju!")
-            return nil
-        }
+        // proto3 預設值不上線（代理重新序列化也會省略 0）：缺席 = 東場／東一局
+        let chang = data["chang"] as? Int ?? 0
+        let ju = data["ju"] as? Int ?? 0
 
         // `chang` 直接拿去索引 `BAKAZE_NAMES`（4 個元素），`ju` 會變成 `oya` 與
         // `kyoku` 進 MJAI 事件流。兩者都是沒有上界的 parsed varint——畸形封包、
@@ -599,6 +621,7 @@ class MajsoulBridge {
                                 fieldId: 1,
                                 reason: "場風或莊家座位超出範圍（chang=\(chang), ju=\(ju)）"
                                     + " → 不發 start_kyoku，這一局不做推薦")
+            roundBlocked = true
             return nil
         }
 
@@ -617,16 +640,28 @@ class MajsoulBridge {
         // 決策吃順位與點差——拿假點數推出來的推薦看起來一樣正常，只是錯的。
         // 少一個 start_kyoku 會讓後續事件在 log 裡大聲報錯，那是可以查的；
         // 用假分數打完一整局不會留下任何痕跡。
-        guard var scores = data["scores"] as? [Int], scores.count == 3 || scores.count == 4 else {
+        // 個數要與人數一致：四麻 4 個、三麻 3 個（或已含補位的 4 個）
+        guard var scores = data["scores"] as? [Int], scores.count == 4 || (is3P && scores.count == 3) else {
             recordBlockingFault(site: "ActionNewRound.scores",
                                 fieldId: 6,
-                                reason: "拿不到本局起始點數（scores=\(data["scores"] ?? "nil")）"
+                                reason: "拿不到本局起始點數（scores=\(data["scores"] ?? "nil")，is3P=\(is3P)）"
                                     + " → 不發 start_kyoku，這一局不做推薦")
+            roundBlocked = true
             return nil
         }
 
         if is3P && scores.count == 3 {
             scores.append(0)
+        }
+
+        // 手牌不是 13／14 張（親家多一張）就不開局：自家手牌留空，Bot 會拿殘缺手牌照常推薦。
+        guard [13, 14].contains(tiles.count) else {
+            recordBlockingFault(site: "ActionNewRound.tiles",
+                                fieldId: 4,
+                                reason: "起手牌張數不對（tiles.count=\(tiles.count)）"
+                                    + " → 不發 start_kyoku，這一局不做推薦")
+            roundBlocked = true
+            return nil
         }
 
         // 處理寶牌
@@ -647,6 +682,7 @@ class MajsoulBridge {
             tehais[seat] = myTehais.sorted(by: LiqiTile.compare)
         }
 
+        roundBlocked = false
         results.append([
             "type": "start_kyoku",
             "bakaze": bakaze,
@@ -724,7 +760,8 @@ class MajsoulBridge {
         lastDiscard = actor
 
         let tsumogiri = data["moqie"] as? Bool ?? false
-        let isLiqi = data["isLiqi"] as? Bool ?? false
+        // W 立直（is_wliqi）同樣是立直；不確定伺服器是否兩個旗標都設，取 OR 兩種都對
+        let isLiqi = (data["isLiqi"] as? Bool ?? false) || (data["isWliqi"] as? Bool ?? false)
 
         // 如果是立直，先發送立直事件
         if isLiqi {
@@ -978,6 +1015,7 @@ class MajsoulBridge {
                                 fieldId: 1,
                                 reason: "重連快照的場風或莊家座位超出範圍"
                                     + "（chang=\(chang), ju=\(ju)）→ 不發 start_kyoku")
+            roundBlocked = true
             return nil
         }
 
@@ -987,11 +1025,12 @@ class MajsoulBridge {
         // 與 `parseNewRound` 同一條規則：解不出點數就不發 start_kyoku。
         // 這條是重連且沒有 actions 可重放時的後備路徑；`GameSnapshot` 的點數在
         // `players[].score`（liqi.json field 9 → PlayerSnapshot field 1）。
-        guard var scores = gameState["scores"] as? [Int], scores.count == 3 || scores.count == 4 else {
+        guard var scores = gameState["scores"] as? [Int], scores.count == 4 || (is3P && scores.count == 3) else {
             recordBlockingFault(site: "GameSnapshot.players.score",
                                 fieldId: 9,
-                                reason: "重連快照拿不到點數（scores=\(gameState["scores"] ?? "nil")）"
+                                reason: "重連快照拿不到點數（scores=\(gameState["scores"] ?? "nil")，is3P=\(is3P)）"
                                     + " → 不發 start_kyoku")
+            roundBlocked = true
             return nil
         }
 
@@ -999,15 +1038,20 @@ class MajsoulBridge {
             scores.append(0)
         }
 
-        // 獲取手牌
+        // 重連時手牌張數會隨副露變少，只擋「完全沒有手牌」
+        guard let myTiles = gameState["tiles"] as? [String], !myTiles.isEmpty else {
+            recordBlockingFault(site: "GameSnapshot.tiles",
+                                fieldId: 6,
+                                reason: "重連快照沒有手牌 → 不發 start_kyoku")
+            roundBlocked = true
+            return nil
+        }
+
         let playerCount = is3P ? 3 : 4
         var tehais = [[String]](repeating: [String](repeating: "?", count: 13), count: playerCount)
-
-        if let myTiles = gameState["tiles"] as? [String] {
-            let myTehais = myTiles.prefix(13).compactMap { LiqiTile.mjai(fromMajsoul: $0) }
-            if seat >= 0 && seat < playerCount {
-                tehais[seat] = myTehais.sorted(by: LiqiTile.compare)
-            }
+        if seat >= 0 && seat < playerCount {
+            tehais[seat] = myTiles.prefix(13).compactMap { LiqiTile.mjai(fromMajsoul: $0) }
+                .sorted(by: LiqiTile.compare)
         }
 
         // 處理寶牌：start_kyoku 只帶第一個 dora_marker
@@ -1020,6 +1064,7 @@ class MajsoulBridge {
             doras = doraList
         }
 
+        roundBlocked = false
         results.append([
             "type": "start_kyoku",
             "bakaze": bakaze,
