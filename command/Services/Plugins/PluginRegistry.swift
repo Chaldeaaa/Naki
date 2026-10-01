@@ -103,11 +103,11 @@ nonisolated enum PluginLoadFailure: Sendable, Equatable {
 
     var text: String {
         switch self {
-        case .noManifest: return "找不到 plugin.json"
-        case .manifestInvalid(let d): return "manifest 無效：\(d)"
-        case .apiVersionUnsupported(let v): return "apiVersion \(v) 不支援（只收 1）"
-        case .idMismatch(let d): return "id 與目錄名不符：\(d)"
-        case .entryUnreadable(let d): return "進入點讀不到：\(d)"
+        case .noManifest: return L10n.text("找不到 plugin.json")
+        case .manifestInvalid(let d): return L10n.text("manifest 無效：\(d)")
+        case .apiVersionUnsupported(let v): return L10n.text("apiVersion \(v) 不支援（只收 1）")
+        case .idMismatch(let d): return L10n.text("id 與目錄名不符：\(d)")
+        case .entryUnreadable(let d): return L10n.text("進入點讀不到：\(d)")
         }
     }
 
@@ -213,12 +213,12 @@ nonisolated enum PluginRegistry {
         guard isSafeName(manifest.id) else {
             return PluginDescriptor(id: dirName, directory: directory, manifest: nil,
                                     entrySource: nil,
-                                    failure: .manifestInvalid("id 只允許 A-Z a-z 0-9 . _ -，且不得以 . 開頭或含 .."))
+                                    failure: .manifestInvalid(L10n.text("id 只允許 A-Z a-z 0-9 . _ -，且不得以 . 開頭或含 ..")))
         }
         guard isSafeEntry(manifest.entry) else {
             return PluginDescriptor(id: dirName, directory: directory, manifest: nil,
                                     entrySource: nil,
-                                    failure: .manifestInvalid("entry 必須是單一 .js 檔名（字元集同 id）"))
+                                    failure: .manifestInvalid(L10n.text("entry 必須是單一 .js 檔名（字元集同 id）")))
         }
 
         // apiVersion exact match（§7.10(b)）。id 取目錄名：移除與啟用清單都以實際目錄為準，
@@ -233,7 +233,7 @@ nonisolated enum PluginRegistry {
         guard manifest.id == dirName else {
             return PluginDescriptor(id: dirName, directory: directory, manifest: nil,
                                     entrySource: nil,
-                                    failure: .idMismatch("manifest '\(manifest.id)' ≠ 目錄 '\(dirName)'"))
+                                    failure: .idMismatch(L10n.text("manifest '\(manifest.id)' ≠ 目錄 '\(dirName)'")))
         }
 
         // settings schema 有效性（§7.10a）：型別必須是 string/number/boolean 且 default 相符。
@@ -242,7 +242,7 @@ nonisolated enum PluginRegistry {
             for (key, field) in schema where !field.isValid {
                 return PluginDescriptor(id: manifest.id, directory: directory, manifest: nil,
                                         entrySource: nil,
-                                        failure: .manifestInvalid("settings.\(key) schema 無效（type 或 default 不合）"))
+                                        failure: .manifestInvalid(L10n.text("settings.\(key) schema 無效（type 或 default 不合）")))
             }
         }
 
@@ -373,8 +373,8 @@ nonisolated enum PluginRegistry {
 
     /// 移除插件：刪掉 `Plugins/<id>/` 整個目錄。
     static func remove(id: String) -> String? {
-        guard !id.isEmpty else { return "id 為空" }
-        guard let root = pluginsDirectory else { return "找不到插件目錄" }
+        guard !id.isEmpty else { return L10n.text("id 為空") }
+        guard let root = pluginsDirectory else { return L10n.text("找不到插件目錄") }
         return remove(directory: root.appendingPathComponent(id, isDirectory: true))
     }
 
@@ -385,16 +385,16 @@ nonisolated enum PluginRegistry {
     /// 呼叫端（NakiRuntime）負責移除前先熱停用（從頁面卸掉 + 清 enabledPluginIds）。
     /// 回傳 nil＝成功；非 nil＝錯誤訊息。
     static func remove(directory: URL, root: URL? = pluginsDirectory) -> String? {
-        guard let root else { return "找不到插件目錄" }
+        guard let root else { return L10n.text("找不到插件目錄") }
         let dir = directory.standardizedFileURL
         guard dir.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL,
               !dir.lastPathComponent.isEmpty else {
-            return "非法路徑（拒絕刪除 \(dir.lastPathComponent)）"
+            return L10n.text("非法路徑（拒絕刪除 \(dir.lastPathComponent)）")
         }
         let fm = FileManager.default
         guard fm.fileExists(atPath: dir.path) else { return nil }
         do { try fm.removeItem(at: dir); return nil }
-        catch { return "刪除失敗：\(error.localizedDescription)" }
+        catch { return L10n.text("刪除失敗：\(error.localizedDescription)") }
     }
 
     /// 安全的 JS 字串字面值（用 JSONSerialization 逸出，避免 id 內有特殊字元破壞注入）。

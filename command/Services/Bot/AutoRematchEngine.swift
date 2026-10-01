@@ -166,9 +166,10 @@ final class AutoRematchEngine {
     // MARK: - 主流程
 
     /// 續局失敗的結局：留 log，並讓畫面知道全自動循環已經停住。
-    private func fail(_ message: String, _ outcome: Outcome) -> Outcome {
-        log(message)
-        onFailure("全自動續局已停止：" + message.replacingOccurrences(of: "[自動續局] ", with: ""))
+    /// 同一個 key 兩種呈現：log 固定繁中（診斷要能 grep），畫面那份跟使用者語言。
+    private func fail(_ reason: String.LocalizationValue, _ outcome: Outcome) -> Outcome {
+        log("[自動續局] " + L10n.text(reason, locale: Locale(identifier: "zh-Hant")))
+        onFailure(L10n.text("全自動續局已停止：\(L10n.text(reason))"))
         return outcome
     }
 
@@ -194,7 +195,7 @@ final class AutoRematchEngine {
             return .cancelled
         }
         guard context().isReady else {
-            return fail("[自動續局] 送出通道未就緒，放棄續局", .notReady)
+            return fail("送出通道未就緒，放棄續局", .notReady)
         }
 
         let sanma = context().prefersSanma
@@ -203,8 +204,8 @@ final class AutoRematchEngine {
         // 三麻只有雲端路徑（bundled 模型的 obs 1012×34 對三麻結構性無效）。
         // 沒有雲端還自動排三麻＝把帳號送進一場自己不會出手的對局。
         if sanma && !context().cloudInferenceActive {
-            return fail("[自動續局] 選了三麻但雲端推論未啟用，不排隊——"
-                        + "三麻只有雲端路徑，排進去也不會出手。", .sanmaWithoutCloud)
+            return fail("選了三麻但雲端推論未啟用，不排隊——三麻只有雲端路徑，排進去也不會出手。",
+                        .sanmaWithoutCloud)
         }
 
         // 段位決定能進哪些房間；取不到就讓 resolver 退回「沿用上次那個房間」
@@ -218,8 +219,9 @@ final class AutoRematchEngine {
             east: context().prefersEast,
             preference: context().roomPreference,
             observations: observations()) else {
-            return fail("[自動續局] 還沒有可用的\(kind) match_sid，不排隊。"
-                        + "請先自己點一次\(kind)的場次入口打一場，Naki 會記下來。",
+            return fail(sanma
+                        ? "還沒有可用的三麻 match_sid，不排隊。請先自己點一次三麻的場次入口打一場，Naki 會記下來。"
+                        : "還沒有可用的四麻 match_sid，不排隊。請先自己點一次四麻的場次入口打一場，Naki 會記下來。",
                         .noObservedSid(sanma: sanma))
         }
 
@@ -239,7 +241,7 @@ final class AutoRematchEngine {
             try? await Task.sleep(for: probeInterval)
         }
         guard lobbyReady else {
-            return fail("[自動續局] 大廳連線探針一直不通，放棄續局", .lobbyNotReady)
+            return fail("大廳連線探針一直不通，放棄續局", .lobbyNotReady)
         }
 
         for attempt in 1...maxAttempts {
@@ -261,8 +263,7 @@ final class AutoRematchEngine {
 
         // 不無限重試：連續被拒通常代表 sid 過期或帳號狀態不對，
         // 一直送只會把錯誤重複到看不見。停手並留下 log。
-        return fail("[自動續局] ❌ \(maxAttempts) 次都未被接受，停止續局",
-                    .rejected(attempts: maxAttempts))
+        return fail("❌ \(maxAttempts) 次都未被接受，停止續局", .rejected(attempts: maxAttempts))
     }
 }
 

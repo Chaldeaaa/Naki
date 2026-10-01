@@ -170,6 +170,7 @@ final class PluginRegistryTests: XCTestCase {
     }
 
     func testFailedInstallKeepsExistingPluginAndCleansStaging() throws {
+        pinAppLanguage()
         try writePlugin(dir: "p", id: "p")
         // 檔名超長：寫入時才會失敗，此時暫存目錄已建立
         let bad = try imported(id: "p", files: ["plugin.json": Data("{}".utf8),
@@ -200,6 +201,7 @@ final class PluginRegistryTests: XCTestCase {
     }
 
     func testUpdatePreviewCoversRewriteAllowObserveAndFreshInstall() throws {
+        pinAppLanguage()
         func manifest(_ extra: String) throws -> PluginManifest {
             try JSONDecoder().decode(PluginManifest.self, from: Data("""
             {"schemaVersion":1,"apiVersion":1,"id":"p","name":"n","version":"1.0","entry":"plugin.js",

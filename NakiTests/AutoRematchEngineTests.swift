@@ -218,6 +218,7 @@ final class AutoRematchEngineTests: XCTestCase {
     /// 失敗結局要讓畫面知道全自動循環停了（log 之外的狀態訊息）
     @MainActor
     func testFailureEndingsReportStatusMessage() async {
+        pinAppLanguage()
         var messages: [String] = []
         let rejected = makeEngine(accepts: { _, _ in false }, onFailure: { messages.append($0) })
         _ = await rejected.run()

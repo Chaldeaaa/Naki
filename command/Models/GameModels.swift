@@ -35,12 +35,25 @@ struct GameState: Equatable {
 
     // MARK: - Computed Properties
 
-    /// 局的顯示名稱 (e.g., "東1局")。`kyoku` 是該場風內的局序（ju + 1），場風看 `bakaze`
+    /// 局的顯示名稱 (e.g., "東1局")。`kyoku` 是該場風內的局序（ju + 1），場風看 `bakaze`。
+    /// 繁中版給 MCP／log；畫面用 `kyokuDisplayKey`。
     var kyokuDisplayName: String {
         "\(bakazeDisplay)\(kyoku)局"
     }
 
-    /// 自風顯示
+    /// 場風逐一列 key：語序依語言不同（en 的場風在局數前後都有可能），不能拿 `bakazeDisplay` 內插
+    var kyokuDisplayKey: LocalizedStringKey {
+        switch bakaze {
+        case .east: return "東\(kyoku)局"
+        case .south: return "南\(kyoku)局"
+        case .west: return "西\(kyoku)局"
+        case .north: return "北\(kyoku)局"
+        }
+    }
+
+    var jikazeDisplayKey: LocalizedStringKey { LocalizedStringKey(jikazeDisplay) }
+
+    /// 自風顯示（繁中 key；畫面用 `jikazeDisplayKey`）
     var jikazeDisplay: String {
         switch jikaze {
         case .east: return "東家"
@@ -188,20 +201,13 @@ struct BotStatus: Equatable {
     /// 都跟四麻不同（沒有 2m-8m、北是拔北寶牌、只有三家的分數與河），
     /// 拿四麻模型去推三麻，輸出不是「稍微偏差」而是**結構上無效**。
     /// 標成 "Mortal (3P)" 會讓人誤以為有專用模型。
-    var modelDisplayName: String {
-        let base: String
-        switch modelName {
-        case "mortal": base = "Mortal (4P)"
-        case "mortal3p": base = "Mortal (3P)"
-        case "cloud-3p": base = "雲端推論 (3P)"
-        default: base = modelName
+    var modelDisplayKey: LocalizedStringKey {
+        let warn = is3P && !isCloudDecision
+        if modelName == "cloud-3p" {
+            return warn ? "雲端推論 (3P) ⚠️ 未生效，無推論" : "雲端推論 (3P)"
         }
-        // 警告後綴只在雲端沒有在服務時出現（服務中掛著會與雲端指示行矛盾）；
-        // 三麻本地模型不啟動，cloud-3p 未生效＝無推論
-        guard is3P && !isCloudDecision else { return base }
-        return modelName == "cloud-3p"
-            ? "\(base) ⚠️ 未生效，無推論"
-            : "\(base) ⚠️ 三麻無專用模型"
+        let base = modelName == "mortal" ? "Mortal (4P)" : modelName == "mortal3p" ? "Mortal (3P)" : modelName
+        return warn ? "\(base) ⚠️ 三麻無專用模型" : LocalizedStringKey(base)
     }
 
     /// 是否有任何可用動作
@@ -276,6 +282,8 @@ struct Recommendation: Identifiable, Equatable {
             case .unknown: return "?"
             }
         }
+
+        var displayNameKey: LocalizedStringKey { LocalizedStringKey(displayName) }
 
         /// 這個動作在遊戲畫面上會不會標到某一張牌。
         ///
@@ -399,6 +407,9 @@ struct Recommendation: Identifiable, Equatable {
         }
     }
 
+    /// `displayLabel` 的畫面版；捨牌／未知的 label 是牌面字串，查不到 key 就原樣顯示
+    var displayLabelKey: LocalizedStringKey { LocalizedStringKey(displayLabel) }
+
     /// 是否為紅寶牌
     var isRed: Bool {
         tile?.isRed ?? label.hasSuffix("r")
@@ -453,10 +464,13 @@ struct MahjongTile: Identifiable, Equatable, Hashable {
         return isRed ? "紅\(name)" : name
     }
 
+    /// `displayName` 的畫面版（繁中牌名就是 key）
+    var displayNameKey: LocalizedStringKey { LocalizedStringKey(displayName) }
+
     /// 無障礙可讀名稱（VoiceOver 用）
     /// 數牌「一萬…九萬 / 一筒…九筒 / 一索…九索」、字牌「東南西北白發中」、紅寶牌加「紅」前綴（如「紅五萬」）。
     /// 供 BotStatusView 與 RecommendationView 共用，避免各寫一份牌名轉換。
-    var accessibleName: String { displayName }
+    var accessibleName: String { L10n.text(.init(displayName)) }
 
     /// MJAI 到 Unicode 的映射表
     static let mjaiToUnicode: [String: String] = [

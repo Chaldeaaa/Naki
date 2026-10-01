@@ -67,7 +67,7 @@ enum CloudDecisionMapper {
             ]
 
         case "pon":
-            let detail = (reaction["pai"] as? String).map { "碰 \($0)" }
+            let detail = (reaction["pai"] as? String).map { L10n.text("碰 \($0)") }
             return [Recommendation(tile: "pon", probability: prob, actionType: .pon,
                                    detail: detail)]
 
@@ -81,7 +81,7 @@ enum CloudDecisionMapper {
             // 不再只有 ①②③ 的相對位置（2026-08-05 顯示掃描的增強）
             return [Recommendation(tile: "chi_\(variant)", probability: prob,
                                    actionType: .chi,
-                                   detail: "用 \(consumed.joined(separator: "·")) 吃 \(pai)")]
+                                   detail: L10n.text("用 \(consumed.joined(separator: "·")) 吃 \(pai)"))]
 
         case "daiminkan", "ankan", "kakan":
             let detail = (reaction["consumed"] as? [String]).map { $0.joined(separator: "·") }

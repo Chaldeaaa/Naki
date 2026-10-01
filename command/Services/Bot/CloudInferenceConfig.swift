@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 /// 雲端推論的生效值。來源是 `SettingsStore.cloudConfig`（key 在 Keychain）。
 struct CloudInferenceConfig: Equatable {
@@ -38,11 +39,16 @@ struct CloudInferenceConfig: Equatable {
     /// **上方**——「貼完 key 就走」是最常見的狀態，結果是一份看起來已配置、行為卻
     /// 完全是本地模型的設定。設定畫面拿這個陣列直接把缺口寫出來，
     /// 判定與 `isActive` 共用同一份定義，不會漂。
-    var missingRequirements: [String] {
-        var missing: [String] = []
-        if !enabled { missing.append("上方的「啟用雲端推論」開關") }
-        if baseURL.trimmingCharacters(in: .whitespaces).isEmpty { missing.append("伺服器 URL") }
-        if apiKey.trimmingCharacters(in: .whitespaces).isEmpty { missing.append("API Key") }
+    var missingRequirements: [String] { missingItems.map(\.text) }
+
+    /// 同一份判定的可本地化版本，給 View 逐項 `Text` 顯示。
+    var missingRequirementKeys: [LocalizedStringKey] { missingItems.map(\.key) }
+
+    private var missingItems: [(text: String, key: LocalizedStringKey)] {
+        var missing: [(text: String, key: LocalizedStringKey)] = []
+        if !enabled { missing.append(("上方的「啟用雲端推論」開關", "上方的「啟用雲端推論」開關")) }
+        if baseURL.trimmingCharacters(in: .whitespaces).isEmpty { missing.append(("伺服器 URL", "伺服器 URL")) }
+        if apiKey.trimmingCharacters(in: .whitespaces).isEmpty { missing.append(("API Key", "API Key")) }
         return missing
     }
 

@@ -142,9 +142,9 @@ final class WebSession {
         // JS 注入失敗時不要顯示「準備就緒」——那正是舊 fallback 最危險的地方：
         // 看起來一切正常，實際上一個封包都收不到、一個動作都送不出去。
         if let failure = JSInjectionState.shared.report.failureSummary {
-            store.statusMessage = "錯誤：JavaScript 注入失敗，Naki 無法讀牌局也無法送出動作（\(failure)）"
+            store.statusMessage = L10n.text("錯誤：JavaScript 注入失敗，Naki 無法讀牌局也無法送出動作（\(failure)）")
         } else {
-            store.statusMessage = "準備就緒"
+            store.statusMessage = L10n.text("準備就緒")
         }
     }
 
@@ -196,7 +196,7 @@ final class WebSession {
         guard let url = server.url else { return }
         hasRequestedInitialLoad = true
         backend.load(url)
-        store.statusMessage = "正在載入\(server.displayName)…"
+        store.statusMessage = L10n.text("正在載入\(server.displayName)…")
     }
 
     /// 換區服。
@@ -209,7 +209,7 @@ final class WebSession {
         guard let url = server.url else { return }
         hasRequestedInitialLoad = true
         backend.load(url)
-        store.statusMessage = "正在切換到\(server.regionName)…"
+        store.statusMessage = L10n.text("正在切換到\(server.localizedRegionName)…")
     }
 
     /// View 出現時的首次載入（重複呼叫無效果）。
@@ -223,7 +223,7 @@ final class WebSession {
 
     func reload() {
         backend.reload()
-        store.statusMessage = "正在重新載入…"
+        store.statusMessage = L10n.text("正在重新載入…")
     }
 
     /// 這條 path 對應的 SwiftUI View（`AdaptiveNakiWebView` 只轉發，不判版本）。
@@ -246,12 +246,12 @@ final class WebSession {
     func forceReconnect() async -> ForceReconnectOutcome {
         guard backend.isReady else {
             bridgeLog("[WebSession] 無法強制重連: 頁面尚未就緒")
-            store.statusMessage = "無法重連：WebView 不可用"
+            store.statusMessage = L10n.text("無法重連：WebView 不可用")
             return .failed("web_view_not_ready")
         }
 
         bridgeLog("[WebSession] 強制重連 WebSocket...")
-        store.statusMessage = "正在強制重連..."
+        store.statusMessage = L10n.text("正在強制重連...")
 
         let outcome = await backend.forceReconnect()
         bridgeLog("[WebSession] 強制重連: \(outcome.statusMessage)")
@@ -452,12 +452,12 @@ extension WebSession: WebNavigationSink {
         // 這裡只管頁面與狀態列。
         lifecycle?.webNavigationDidStart()
         hasAppliedHideNames = false
-        store.statusMessage = "正在加載雀魂..."
+        store.statusMessage = L10n.text("正在加載雀魂...")
         systemLog("[生命週期] 頁面開始載入")
     }
 
     func webDidCommitNavigation() {
-        store.statusMessage = "雀魂已加載，等待連接..."
+        store.statusMessage = L10n.text("雀魂已加載，等待連接...")
     }
 
     func webDidFinishNavigation() {
@@ -469,12 +469,12 @@ extension WebSession: WebNavigationSink {
         // 同上：JS 端的開關 reload 後回到預設（開），使用者關掉的話要重推
         pushKeepAlive()
         if !store.isConnected {
-            store.statusMessage = "已載入，等待 WebSocket 連接..."
+            store.statusMessage = L10n.text("已載入，等待 WebSocket 連接...")
         }
     }
 
     func webDidFailNavigation(_ message: String) {
-        store.statusMessage = "加載失敗: \(message)"
+        store.statusMessage = L10n.text("加載失敗: \(message)")
 
         // `statusMessage` 會被下一個事件蓋掉，而頁面載不起來時 Naki 什麼都做不了
         // ——這件事必須留下**查得到**的痕跡，並且掛在畫面上直到重新載入成功。

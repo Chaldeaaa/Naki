@@ -95,7 +95,7 @@ final class NakiWebCoordinator {
 
             Task { @MainActor in
                 self.store.isConnected = connected
-                self.store.statusMessage = connected ? "已連線到雀魂服务器" : "已斷開連線"
+                self.store.statusMessage = L10n.text(connected ? "已連線到雀魂伺服器" : "已斷開連線")
 
                 if connected {
                     self.websocketHandler.reset()
@@ -122,7 +122,7 @@ final class NakiWebCoordinator {
     func createBot(playerId: Int, is3P: Bool) throws {
         try bot.createBot(playerId: UInt8(playerId), is3P: is3P)
         store.botStatus = bot.botState
-        store.statusMessage = "Bot 已建立 (Player \(playerId))"
+        store.statusMessage = L10n.text("Bot 已建立 (Player \(playerId))")
     }
 
     /// 刪除 Bot 並清掉屬於這一局的資料。
@@ -148,7 +148,7 @@ final class NakiWebCoordinator {
             // controller 已清掉推薦；照樣寫進 store，畫面才不會停在上一個成功事件
             // （模型檔缺失時每個事件都會走到這裡）
             store.apply(controller: bot, showRecommendation: store.autoPlayMode.showRecommendation)
-            let message = "Bot：\(error.localizedDescription)"
+            let message = L10n.text("Bot：\(error.localizedDescription)")
             store.statusMessage = message
             store.botFailure = message
             observer?.botDidRespond()
@@ -214,7 +214,7 @@ final class NakiWebCoordinator {
             eventStream.emit(event)
             eventStream.endGame()
             deleteBot()   // 手牌／推薦／botStatus 一併清空
-            store.statusMessage = "遊戲結束"
+            store.statusMessage = L10n.text("遊戲結束")
 
         case "end_kyoku":
             // 局間結算：伺服器停在結算窗口等 confirmNewRound。通知引擎（受閘門控制）。
@@ -279,7 +279,7 @@ final class NakiWebCoordinator {
             // （只涵蓋這條 history 重放；syncGame 重放走 live 路徑，由 CloudBot 依授權序號擋）
             // （否則重連要付 N 決策 × 2s 逾時預算＋額度）
             bot.prepareForResyncReplay(eventCount: eventStream.eventCount)
-            store.statusMessage = "Bot 已重新同步 (Player \(playerId))"
+            store.statusMessage = L10n.text("Bot 已重新同步 (Player \(playerId))")
             startEventConsumer()
             bridgeLog("[協調器] Bot 重新同步成功")
         } catch {

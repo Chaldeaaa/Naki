@@ -1005,7 +1005,7 @@ final class AutoPlayEngine {
         guard horaFailed || stallTicks >= Self.stallTickThreshold else { return }
 
         let stall = AutoPlayStall(
-            reason: horaFailed ? "和牌送不出去，請手動操作" : reason,
+            reason: horaFailed ? L10n.text("和牌送不出去，請手動操作") : reason,
             consecutiveTicks: stallTicks,
             sinceSequence: pending.sequence,
             elapsedSeconds: Int(timing.clock().timeIntervalSince(pending.capturedAt)))
