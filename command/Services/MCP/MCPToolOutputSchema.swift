@@ -130,7 +130,7 @@ enum NakiToolOutputSchemas {
                 "registeredTools": integer("registry 工具數"),
                 "snapshot": nullableObject("遊戲快照；回調未設定時為 null"),
                 "snapshotError": string("快照不可用的原因"),
-                "recentResponses": array("Naki 自送請求（msgId >= 60000）的 RESPONSE"),
+                "recentResponses": array("Naki 自送請求（msgId 登記制）的 RESPONSE"),
                 "broadcasts": array("收到的表情廣播"),
                 "note": string("資料範圍說明")
             ],
@@ -311,7 +311,7 @@ enum NakiToolOutputSchemas {
             "success": boolean("bytes 是否成功交給 WebSocket——**不等於**伺服器接受"),
             "method": string("送出的 Liqi method"),
             "payloadHex": string("protobuf payload 的 hex（對拍用）"),
-            "msgId": integer("Naki 自送請求的 msgId（60000 號段）"),
+            "msgId": integer("Naki 自送請求的 msgId（登記制）"),
             "bytes": integer("送出的 byte 數"),
             "detail": string("送出通道的診斷訊息"),
             "error": string("liqi_sender_unavailable / send_failed / 工具自訂代碼"),

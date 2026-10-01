@@ -89,6 +89,9 @@ class DebugServer: MCPHTTPResponder {
     /// 單一 HTTP request 累積上限（含 header + body），避免超大或惡意 body 造成無限等待 / 記憶體爆掉
     private let maxRequestSize = 10 * 1024 * 1024  // 10 MB
 
+    /// header／body 收不齊的連線最長等多久；request 一收齊就解除（工具執行可以比這更久）
+    private let requestReceiveTimeout: TimeInterval = 30
+
     /// MCP／Debug 這一層需要的全部能力（狀態讀 `store`，副作用走 Action）
     private let dependencies: NakiMCPDependencies
 
@@ -200,12 +203,15 @@ class DebugServer: MCPHTTPResponder {
 
     private func handleConnection(_ connection: NWConnection) {
         connection.start(queue: .main)
-        receiveRequest(connection: connection, buffer: Data())
+        // 沒有 idle timeout 的話，只送半截 header 的連線會永遠佔著
+        let deadline = DispatchWorkItem { connection.cancel() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestReceiveTimeout, execute: deadline)
+        receiveRequest(connection: connection, buffer: Data(), deadline: deadline)
     }
 
     /// 持續 receive 累積資料，直到整條 HTTP request 收滿（header + Content-Length 指定的 body）
     /// 或連線結束 / 達到大小上限。解決大的 `/js`、`/mcp` body 跨 TCP 段被截斷的問題。
-    private func receiveRequest(connection: NWConnection, buffer: Data) {
+    private func receiveRequest(connection: NWConnection, buffer: Data, deadline: DispatchWorkItem) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
 
@@ -236,7 +242,7 @@ class DebugServer: MCPHTTPResponder {
                 if ended {
                     connection.cancel()
                 } else {
-                    self.receiveRequest(connection: connection, buffer: accumulated)
+                    self.receiveRequest(connection: connection, buffer: accumulated, deadline: deadline)
                 }
                 return
             }
@@ -245,50 +251,48 @@ class DebugServer: MCPHTTPResponder {
             guard let headerEnd = accumulated.range(of: Data([0x0d, 0x0a, 0x0d, 0x0a])) else {
                 if ended {
                     // 連線結束但 header 仍不完整 → 用現有資料盡力處理
-                    self.processRequestData(accumulated, connection: connection)
+                    self.processRequestData(accumulated, connection: connection, deadline: deadline)
                 } else {
-                    self.receiveRequest(connection: connection, buffer: accumulated)
+                    self.receiveRequest(connection: connection, buffer: accumulated, deadline: deadline)
                 }
                 return
             }
 
             // 解析 Content-Length，判斷 body 是否收滿
             let headerData = accumulated.subdata(in: accumulated.startIndex..<headerEnd.lowerBound)
-            let expectedBodyLength = self.parseContentLength(fromHeaderData: headerData) ?? 0
+            let headerLines = String(decoding: headerData, as: UTF8.self).components(separatedBy: "\r\n")
+            let contentLength = NakiHTTPHeaderReader.value("content-length", in: headerLines).flatMap { Int($0) }
+            let expectedBodyLength = contentLength ?? 0
             let currentBodyLength = accumulated.distance(from: headerEnd.upperBound, to: accumulated.endIndex)
+
+            // chunked（或沒有 Content-Length 卻帶了 body）沒有可靠的 body 邊界：
+            // 硬收會截斷，或把 chunk framing 當 JS 執行。沒有 body 的 POST（`/bot/trigger`）照常放行。
+            if NakiHTTPHeaderReader.value("transfer-encoding", in: headerLines) != nil
+                || (contentLength == nil && currentBodyLength > 0) {
+                deadline.cancel()
+                self.sendResponse(connection: connection, status: 411, body: "Length Required")
+                return
+            }
 
             if currentBodyLength >= expectedBodyLength || ended {
                 // body 已收滿（或連線結束）→ 處理
-                self.processRequestData(accumulated, connection: connection)
+                self.processRequestData(accumulated, connection: connection, deadline: deadline)
             } else {
                 // body 跨 TCP 段尚未收滿，繼續累積
-                self.receiveRequest(connection: connection, buffer: accumulated)
+                self.receiveRequest(connection: connection, buffer: accumulated, deadline: deadline)
             }
         }
     }
 
     /// 將完整 request 資料轉為字串並交給路由處理
-    private func processRequestData(_ data: Data, connection: NWConnection) {
+    private func processRequestData(_ data: Data, connection: NWConnection, deadline: DispatchWorkItem) {
+        deadline.cancel()
         if let request = String(data: data, encoding: .utf8) {
             handleRequest(request, connection: connection)
         } else {
             // 非 UTF-8：用 lossy 解碼避免整條丟棄
             handleRequest(String(decoding: data, as: UTF8.self), connection: connection)
         }
-    }
-
-    /// 從 HTTP header 區塊解析 Content-Length（大小寫不敏感）
-    private func parseContentLength(fromHeaderData headerData: Data) -> Int? {
-        guard let headerString = String(data: headerData, encoding: .utf8) else { return nil }
-        for line in headerString.components(separatedBy: "\r\n") {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[line.startIndex..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-            if name == "content-length" {
-                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                return Int(value)
-            }
-        }
-        return nil
     }
 
     private func handleRequest(_ request: String, connection: NWConnection) {
@@ -317,12 +321,12 @@ class DebugServer: MCPHTTPResponder {
         // 對它們來說 127.0.0.1:8765 是可達位址，而這個 server 能執行 JS、送出遊戲動作。
         // 規格要求非法 Origin 回 403，這裡對所有 endpoint 一起套用（`/js` 比 `/mcp` 更危險）。
         // 沒帶 Origin 的請求放行——curl、Claude Code 的 MCP client、skill 腳本都不送。
-        let origin = NakiHTTPHeaderReader.value("origin", in: lines)
-        guard NakiMCPOriginPolicy.isAllowed(origin) else {
-            log("Rejected non-loopback origin: \(origin ?? "?") for \(method) \(path)")
-            sendResponse(connection: connection,
-                         status: 403,
-                         body: NakiMCPOriginPolicy.forbiddenBody(origin: origin),
+        // Host 驗證是 DNS rebinding 的另一半：Origin 只有跨站請求才會帶，rebinding 之後
+        // 頁面與 server 同源，GET 不帶 Origin，只有 Host 會露出攻擊者的網域。
+        // 兩道檢查都在 `NakiMCPRequestGuard`，沒有 Host 的請求（HTTP/1.0 的 curl）放行不會開洞。
+        if let rejected = NakiMCPRequestGuard.rejection(lines: lines) {
+            log("\(rejected.reason) for \(method) \(path)")
+            sendResponse(connection: connection, status: 403, body: rejected.body,
                          contentType: "application/json")
             return
         }
@@ -723,6 +727,7 @@ class DebugServer: MCPHTTPResponder {
         case 403: statusText = "Forbidden"
         case 404: statusText = "Not Found"
         case 405: statusText = "Method Not Allowed"
+        case 411: statusText = "Length Required"
         case 500: statusText = "Internal Server Error"
         default: statusText = "Unknown"
         }
@@ -766,8 +771,7 @@ class DebugServer: MCPHTTPResponder {
                 throw NSError(domain: "MCPServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty JSON data"])
             }
 
-            let sanitized = JSONSanitizer.sanitize(data)
-            let jsonData = try JSONSerialization.data(withJSONObject: sanitized, options: .prettyPrinted)
+            let jsonData = try JSONSanitizer.data(data, options: .prettyPrinted)
             let body = String(data: jsonData, encoding: .utf8) ?? "{}"
             sendResponse(connection: connection, status: 200, body: body, contentType: "application/json")
         } catch {

@@ -87,6 +87,9 @@ struct ReplayGameTool: MCPTool {
             let dir = try await ReplaySupport.gamesDirectory(session: arguments["session"] as? String)
             url = dir.appendingPathComponent(file)
         }
+        guard ReplaySupport.isInsideLogsRoot(url) else {
+            throw MCPToolError.invalidParameter("file", expected: "~/Library/Logs/Naki/ 底下的錄影檔")
+        }
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw MCPToolError.invalidParameter("file", expected: "存在的錄影檔；用 replay_list 確認")
         }
@@ -111,13 +114,25 @@ enum ReplaySupport {
         guard let session, !session.isEmpty else {
             return current.appendingPathComponent("games", isDirectory: true)
         }
-        // session 是同一層的兄弟目錄；不接受路徑分隔避免跳出去
-        guard !session.contains("/") else {
-            throw MCPToolError.invalidParameter("session", expected: "目錄名稱，不含 /")
+        // session 是同一層的兄弟目錄；不接受路徑分隔與 `..` 避免跳出去
+        guard !session.contains("/"), session != "..", session != "." else {
+            throw MCPToolError.invalidParameter("session", expected: "目錄名稱，不含 / 或 ..")
         }
         return current.deletingLastPathComponent()
             .appendingPathComponent(session, isDirectory: true)
             .appendingPathComponent("games", isDirectory: true)
+    }
+
+    /// 錄影只能從 log 根目錄讀：`file` 收絕對路徑、相對名稱可含 `..`，
+    /// 不擋的話 `replay_game` 能拿去解析任意檔案。解析 symlink 與 `..` 之後再比前綴。
+    nonisolated static func isInsideLogsRoot(_ url: URL, root: URL = logsRoot) -> Bool {
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+        return resolved.hasPrefix(root.resolvingSymlinksInPath().standardizedFileURL.path + "/")
+    }
+
+    nonisolated static var logsRoot: URL {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/Naki", isDirectory: true)
     }
 
     /// 用一個獨立的 Bot 重跑事件流
@@ -135,7 +150,10 @@ enum ReplaySupport {
         let is3P = (startGame["is3P"] as? Bool) ?? false
 
         let controller = NativeBotController()
-        try controller.createBot(playerId: UInt8(playerId), is3P: is3P)
+        guard let seat = UInt8(exactly: playerId) else {
+            throw MCPToolError.invalidParameter("file", expected: "start_game.id 在 0–255 的錄影")
+        }
+        try controller.createBot(playerId: seat, is3P: is3P)
         defer { controller.deleteBot() }
 
         var decisions: [[String: Any]] = []

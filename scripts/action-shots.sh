@@ -61,11 +61,20 @@ shot() {
   echo "$(date +%H:%M:%S) 📸 $tag"
 }
 
-cleanup() { kill 0 2>/dev/null; }
-trap cleanup EXIT INT TERM
-
 # 兩個 log 併成一條流。都從檔尾開始，不重播歷史。
-{ tail -F -n 0 "$EVENTS" 2>/dev/null & tail -F -n 0 "$BRIDGE" 2>/dev/null & } | while IFS= read -r line; do
+# tail 經 FIFO 而不是 `{ tail & tail & } |`：要拿得到 pid，結束時只殺自己起的這兩個
+# （原本的 `kill 0` 會連呼叫這支腳本的行程群組一起殺掉）
+FIFO="$(mktemp -u "${TMPDIR:-/tmp}/naki-shots.XXXXXX")"
+mkfifo "$FIFO"
+tail -F -n 0 "$EVENTS" > "$FIFO" 2>/dev/null & TAIL_PIDS=("$!")
+tail -F -n 0 "$BRIDGE" > "$FIFO" 2>/dev/null & TAIL_PIDS+=("$!")
+# 陣列而非字串：trap 在 `read` 的 `IFS=` 生效期間執行，未加引號的 `$TAIL_PIDS` 不會分詞
+cleanup() { kill "${TAIL_PIDS[@]}" 2>/dev/null; rm -f "$FIFO"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+while IFS= read -r line; do
 
   # --- 異常優先：先判，免得被下面的 continue 濾掉 ---
   if printf '%s' "$line" | grep -qE "$ANOMALY_RE"; then
@@ -86,4 +95,4 @@ trap cleanup EXIT INT TERM
   ops="$(printf '%s' "$line" | sed -n 's/.*oplist=\[\([0-9, ]*\)\].*/\1/p' | tr -d ' ,')"
   top="$(printf '%s' "$line" | sed -n 's/.*\[\([a-z]*\):\([^@]*\)@.*/\1-\2/p' | tr -d ' /')"
   shot "act-ops${ops:-x}-${top:-none}"
-done
+done < "$FIFO"
