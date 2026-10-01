@@ -43,6 +43,9 @@ enum MajsoulServer: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    nonisolated var displayNameKey: LocalizedStringKey { LocalizedStringKey(displayName) }
+
+    /// 繁中 key；SwiftUI 用 `regionNameKey`，拼進 String 用 `localizedRegionName`。
     nonisolated var regionName: String {
         switch self {
         case .cn:   return "國服"
@@ -50,6 +53,9 @@ enum MajsoulServer: String, CaseIterable, Identifiable, Sendable {
         case .intl: return "國際服"
         }
     }
+
+    nonisolated var regionNameKey: LocalizedStringKey { LocalizedStringKey(regionName) }
+    nonisolated var localizedRegionName: String { L10n.text(.init(regionName)) }
 
     nonisolated var urlString: String {
         switch self {
@@ -68,6 +74,36 @@ enum MajsoulServer: String, CaseIterable, Identifiable, Sendable {
 @Observable
 @MainActor
 final class SettingsStore {
+
+    /// App 內語言的持久化 key。
+    nonisolated static let appLanguageKey = "naki.appLanguage"
+
+    nonisolated static func loadAppLanguage(from defaults: UserDefaults = .standard) -> AppLanguage {
+        defaults.string(forKey: appLanguageKey).flatMap(AppLanguage.init(rawValue:)) ?? .system
+    }
+
+    nonisolated static func saveAppLanguage(_ language: AppLanguage, to defaults: UserDefaults = .standard) {
+        defaults.set(language.rawValue, forKey: appLanguageKey)
+    }
+
+    /// 使用者選的語言；`.system` 跟隨系統。`.appLocale()` 與 `L10n` 都從這裡（或同一個 key）取 locale。
+    var appLanguage: AppLanguage = SettingsStore.loadAppLanguage()
+    {
+        didSet {
+            guard appLanguage != oldValue else { return }
+            Self.saveAppLanguage(appLanguage)
+        }
+    }
+
+    /// 覆寫 SwiftUI 的 locale；`nil` 表示不覆寫（沿用系統）。
+    /// iOS 沒有 App 內語言選單（走「設定 → Naki → 語言」），一律不覆寫。
+    var locale: Locale? {
+        #if os(macOS)
+        appLanguage.locale
+        #else
+        nil
+        #endif
+    }
 
     /// 隱藏玩家名稱的持久化 key —— **唯一定義點**。
     ///

@@ -9,12 +9,14 @@ final class NakiTests: XCTestCase {
     // MARK: - MahjongTile 可讀名稱（Accessibility / #Phase3）
 
     func testMahjongTileAccessibleNameNumberTiles() {
+        pinAppLanguage()
         XCTAssertEqual(MahjongTile(mjai: "5m").accessibleName, "五萬")
         XCTAssertEqual(MahjongTile(mjai: "1p").accessibleName, "一筒")
         XCTAssertEqual(MahjongTile(mjai: "9s").accessibleName, "九索")
     }
 
     func testMahjongTileAccessibleNameHonorsAndRed() {
+        pinAppLanguage()
         XCTAssertEqual(MahjongTile(mjai: "E").accessibleName, "東")
         XCTAssertEqual(MahjongTile(mjai: "C").accessibleName, "中")
         XCTAssertEqual(MahjongTile(mjai: "5mr").accessibleName, "紅五萬")
@@ -38,5 +40,15 @@ final class NakiTests: XCTestCase {
         // 東2局：親家輪到座位 1，座位 0 的自風應為北(3)
         XCTAssertEqual(jikaze(playerId: 0, kyoku: 2, playerCount: 4), 3)
         XCTAssertEqual(jikaze(playerId: 1, kyoku: 2, playerCount: 4), 0)
+    }
+}
+
+extension XCTestCase {
+    /// 釘住 App 內語言：`L10n.text` 讀 `UserDefaults.standard`，繁中斷言不該被測試主機的系統語言左右。
+    func pinAppLanguage(_ language: AppLanguage = .zhHant) {
+        let defaults = UserDefaults.standard
+        let original = defaults.string(forKey: SettingsStore.appLanguageKey)
+        SettingsStore.saveAppLanguage(language, to: defaults)
+        addTeardownBlock { defaults.set(original, forKey: SettingsStore.appLanguageKey) }
     }
 }

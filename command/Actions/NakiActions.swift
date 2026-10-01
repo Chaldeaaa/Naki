@@ -911,6 +911,33 @@ struct SetHidePlayerNamesAction {
   }
 }
 
+// MARK: - SetAppLanguageAction
+
+/// 切換 App 內語言（設定 Picker）。`.appLocale()` 的 `.environment(\.locale)` 讀 `settings.locale`，寫入即重繪。
+@MainActor
+struct SetAppLanguageAction {
+
+  private nonisolated(unsafe) let perform: (AppLanguage) -> Void
+
+  private init(perform: @escaping (AppLanguage) -> Void) {
+    self.perform = perform
+  }
+
+  /// 真實實作
+  init(settings: SettingsStore) {
+    self.init(perform: { [weak settings] language in settings?.appLanguage = language })
+  }
+
+  /// Preview／未接線的預設值；`nonisolated` 的理由見 `ExecuteJavaScriptAction.init()`。
+  nonisolated init() {
+    self.perform = { _ in }
+  }
+
+  func callAsFunction(_ language: AppLanguage) {
+    perform(language)
+  }
+}
+
 // MARK: - SetKeepAliveInBackgroundAction
 
 /// 背景保活開關（設定 Toggle）。持久化與推送 JS 都在 `WebSession.setKeepAliveInBackground`。
@@ -1027,6 +1054,8 @@ struct NakiActions {
   var setHidePlayerNames: SetHidePlayerNamesAction
   /// 背景保活開關
   var setKeepAliveInBackground: SetKeepAliveInBackgroundAction
+  /// 切換 App 內語言
+  var setAppLanguage: SetAppLanguageAction
   /// 交出這條 path 的 WebView
   var webView: WebViewAction
 
@@ -1054,6 +1083,7 @@ struct NakiActions {
     self.switchServer = SwitchServerAction()
     self.setHidePlayerNames = SetHidePlayerNamesAction()
     self.setKeepAliveInBackground = SetKeepAliveInBackgroundAction()
+    self.setAppLanguage = SetAppLanguageAction()
     self.webView = WebViewAction()
   }
 
@@ -1076,6 +1106,7 @@ struct NakiActions {
        switchServer: SwitchServerAction,
        setHidePlayerNames: SetHidePlayerNamesAction,
        setKeepAliveInBackground: SetKeepAliveInBackgroundAction,
+       setAppLanguage: SetAppLanguageAction,
        webView: WebViewAction) {
     self.executeJavaScript = executeJavaScript
     self.setPluginEnabled = setPluginEnabled
@@ -1095,6 +1126,7 @@ struct NakiActions {
     self.switchServer = switchServer
     self.setHidePlayerNames = setHidePlayerNames
     self.setKeepAliveInBackground = setKeepAliveInBackground
+    self.setAppLanguage = setAppLanguage
     self.webView = webView
   }
 }

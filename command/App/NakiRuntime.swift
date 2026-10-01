@@ -279,13 +279,14 @@ final class NakiRuntime {
         store.autoPlayMode = effective
 
         if effective != mode {
-            store.statusMessage = "此裝置不支援自動送出，已改為推薦模式"
+            store.statusMessage = L10n.text("此裝置不支援自動送出，已改為推薦模式")
             bridgeLog("[Naki] 要求 \(mode.rawValue) → 降級為 \(effective.rawValue)："
                 + AutoPlayAvailability.autoUnavailableReason)
         } else {
             bridgeLog("[Naki] 自動打牌模式設定為: \(effective.rawValue)")
         }
-        logToStatusBar("模式已變更: \(effective.rawValue), 推薦數: \(store.recommendations.count)")
+        bridgeLog("模式已變更: \(effective.rawValue), 推薦數: \(store.recommendations.count)")
+        store.statusMessage = L10n.text("模式已變更: \(effective.localizedName), 推薦數: \(store.recommendations.count)")
 
         // 模式一改就要立刻反映在畫面上，不能等下一次 Bot 回應：
         // 切到 `.off` 時把遊戲內標記清掉，切回 `.recommend` / `.auto` 時重新染上。
@@ -362,7 +363,7 @@ final class NakiRuntime {
 
     func startDebugServer() {
         guard debugServer == nil else {
-            store.statusMessage = "MCP Server 已在運行"
+            store.statusMessage = L10n.text("MCP Server 已在運行")
             return
         }
 
@@ -376,7 +377,7 @@ final class NakiRuntime {
         debugServer?.stop()
         debugServer = nil
         store.isDebugServerRunning = false
-        store.statusMessage = "MCP Server 已停止"
+        store.statusMessage = L10n.text("MCP Server 已停止")
         systemLog("[生命週期] MCP Server 已停止")
     }
 
@@ -506,7 +507,7 @@ final class NakiRuntime {
             .map { PluginRegistry.remove(directory: $0.directory) } ?? PluginRegistry.remove(id: id)
         if let error {
             systemLog("[Plugin] 移除 \(id) 失敗：\(error)")
-            store.statusMessage = "移除插件失敗：\(error)"
+            store.statusMessage = L10n.text("移除插件失敗：\(error)")
         }
         rescanPlugins()
     }
@@ -531,6 +532,7 @@ final class NakiRuntime {
             switchServer: SwitchServerAction(session: session),
             setHidePlayerNames: SetHidePlayerNamesAction(session: session),
             setKeepAliveInBackground: SetKeepAliveInBackgroundAction(session: session),
+            setAppLanguage: SetAppLanguageAction(settings: settings),
             webView: WebViewAction(session: session))
     }
 }
