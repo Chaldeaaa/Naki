@@ -136,7 +136,11 @@ final class BundledCoreMLBot: MahjongBot {
         }
 
         // 更新推薦列表（Bot 已選擇動作，顯示所有可用選項及其機率）
-        let (recommendations, legalCount) = await recommendationsAfterAction()
+        var (recommendations, legalCount) = await recommendationsAfterAction()
+        if response["type"] as? String == "reach" {
+            recommendations = Self.mergingDeclaration(await recommendationsAfterReach(),
+                                                      into: recommendations)
+        }
         return BotReaction(action: response, recommendations: recommendations,
                            source: "local", forced: legalCount == 1)
     }
@@ -165,6 +169,26 @@ final class BundledCoreMLBot: MahjongBot {
         // mapper 對個別索引可回 nil，映射後的數量分不出「強制」與「只映射出一個」
         return (recommendations.sorted { $0.probability > $1.probability },
                 mask.filter { $0 == 1 }.count)
+    }
+
+    /// 立直項維持首位，打牌項換成宣言後的推論；`declaration` 為空就保留原列。
+    nonisolated static func mergingDeclaration(_ declaration: [Recommendation],
+                                   into base: [Recommendation]) -> [Recommendation] {
+        guard !declaration.isEmpty else { return base }
+        return base.filter { $0.actionType == .riichi } + declaration
+    }
+
+    /// 立直宣言後再推論：宣言牌的機率分布以「已立直」狀態重算，才不會是未立直時的打牌分布。
+    /// 合成的 `reach` 之後伺服器還會真的餵一次，`handleReach` 只設旗標，重複無害。
+    private func recommendationsAfterReach() async -> [Recommendation] {
+        do {
+            let event = try JSONSerialization.data(withJSONObject: ["type": "reach", "actor": Int(playerId)])
+            _ = try await bot.react(mjaiEvent: String(decoding: event, as: UTF8.self))
+        } catch {
+            eventLog("[Bot] ⚠️ 立直後餵 reach 失敗（\(error)），沿用立直前的打牌推薦")
+            return []
+        }
+        return await recommendationsFromCurrentMask()
     }
 
     /// 自家吃／碰／大明槓之後，對當前狀態推論出捨牌推薦。

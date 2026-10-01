@@ -77,8 +77,8 @@ enum AutoPlayActionExecutor {
             // 必須同時帶上捨牌，因此取同一批推薦中機率最高的打牌當宣言牌。
             // 伺服器的立直 combination（可宣言牌）解析得出來時，只在裡面挑；
             // 挑不到（沒有推薦落在其中）或解析不出來就維持不限制，非法牌由伺服器拒絕後重試。
-            // ⚠️ 未驗證：combination 的實際字串格式（此處假設單張雀魂牌字串，`|` 分隔也吃）
-            // 與此選法是否與 Mortal 立直後的第二次推論結果一致。
+            // 本地 bot 的打牌項已是立直後的第二次推論；這裡的 combination 過濾是安全網。
+            // ⚠️ 未驗證：combination 的實際字串格式（此處假設單張雀魂牌字串，`|` 分隔也吃）。
             let declarable = declarableRiichiTiles(snapshot)
             let discards = recommendations.filter { $0.actionType == .discard }
             let inCombination = discards.first { declarable.contains($0.displayTile) }
