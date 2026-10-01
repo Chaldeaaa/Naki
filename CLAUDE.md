@@ -50,7 +50,7 @@ curl -X POST http://127.0.0.1:8765/js \
 | Debug／MCP | loopback port 8765，same process／same port |
 | MCP 協定 | 雙版本並存：帶 `_meta.io.modelcontextprotocol/protocolVersion` 走 2026-07-28（stateless、`server/discover`、`resultType`），`initialize` handshake 服務 2025-03-26～2025-11-25 |
 
-Xcode dependency requirement 是 MortalSwift `[0.5.1,0.6.0)`（`upToNextMinor(from: 0.5.1)`），不是 exact——**0.5.0 會編不過**，因為 `NativeBotController` 呼叫的 `bot.inferCurrentState()` 是 0.5.1 才有的 API。範圍下界只是保護，真正決定 revision 的是 `Package.resolved`：它已從 `.gitignore` 移出並提交，clean clone 會拿到同一個 `78b048e`。**改 requirement 或跑 `-resolvePackageDependencies` 之後，要把重寫的 `Package.resolved` 一起 commit**，否則 lockfile 又會跟 requirement 漂開。
+Xcode dependency requirement 是 MortalSwift `[0.5.2,0.6.0)`（`upToNextMinorVersion`、`minimumVersion = 0.5.2`，`project.pbxproj:1203`），不是 exact——**0.5.0 會編不過**，因為 `NativeBotController` 呼叫的 `bot.inferCurrentState()` 是 0.5.1 才有的 API。範圍下界只是保護，真正決定 revision 的是 `Package.resolved`（`Naki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`）：它已從 `.gitignore` 移出並提交，clean clone 會拿到同一個 `6223548`。**改 requirement 或跑 `-resolvePackageDependencies` 之後，要把重寫的 `Package.resolved` 一起 commit**，否則 lockfile 又會跟 requirement 漂開。
 
 ## Build／test
 
@@ -62,7 +62,7 @@ xcodebuild test -project Naki.xcodeproj -scheme Naki -only-testing:NakiTests
 
 開始前先看 `git status`、Xcode／package resolution 與現有 Naki process。
 
-log 每次啟動寫進 `~/Library/Logs/Naki/<timestamp>/`（`all.log`、`events.log`、六個分類、保留 8 次），所以 test host 與正式 App 不再共用檔名。仍建議不要在 live 對局期間跑 tests——test host 會另外啟一個 App instance。
+log 每次啟動寫進 `~/Library/Logs/Naki/<timestamp>/`（`all.log`、`events.log`、六個分類）。只保留最近 8 次的完整目錄；更舊的 session 若有 `games/` 錄影就只留 `games/`，否則整個刪除；test host（有 `XCTestConfigurationFilePath`）不輪替（`command/Services/LogManager.swift:186`、`:204`）。仍建議不要在 live 對局期間跑 tests——test host 會另外啟一個 App instance。
 
 記憶體 log 只有 `LogManager` 一份：`DebugServer.log()` 寫進去，`GET /logs`／`get_logs` 從 `LogManager.recentLogLines()` 讀（依 `timestamp` 排序）。`DebugServer.onStatusMessage` 只更新 UI 狀態列，不是第二條 log 通道——在那裡再呼叫一次 `bridgeLog` 就會恢復成每條訊息出現兩次。
 
@@ -102,7 +102,7 @@ OptionalOperationList
 | decision | `command/Services/Bot/AutoPlayDecisionResolver.swift` |
 | 自動打牌狀態機 | `command/Services/Bot/AutoPlayEngine.swift`（單一 Task 迴圈：輪詢＋延遲＋重試都用 `Task.sleep`；執行狀態是 enum，進出只有 `occupy(...)` 一個作用域） |
 | 對局結束後自動排下一場 | `command/Services/Bot/AutoRematchEngine.swift`（只有 `.fullAuto` 會動；`end_game` 或大廳按「開始」觸發） |
-| match_sid 觀察／持久化 | `command/Services/Bridge/ObservedMatchSids.swift`（只學**遊戲自己送的**，msgId < 60000） |
+| match_sid 觀察／持久化 | `command/Services/Bridge/ObservedMatchSids.swift`（只學**遊戲自己送的**：msgId 不在 `LiqiMsgIdAllocator` 登記、也不在插件號段 64000–65500，見 `LiqiParser.isNakiSent`） |
 | 段位場房間門檻表 | `command/Services/Bridge/MatchModeTable.swift`（`lqc.lqbin` 解出；只用來挑候選，權威仍在伺服器） |
 | action 送出 | `command/Services/Bot/AutoPlayActionExecutor.swift`（兩條 WebView path 共用的唯一動作 switch，9 種動作 + unknown；成功才 markHandled） |
 | AI | `command/Services/Bot/NativeBotController.swift` |
@@ -137,8 +137,11 @@ OptionalOperationList
   也沒有 sid 欄位。唯一來源是攔玩家自己點入口時送出的那一筆
   （`ObservedMatchSids`，已持久化）。搭配的 `client_version_string` 是
   `"WebGL_2022-0.16.257"`——**不是** `version.json` 的 `0.11.252.w`。
-  ⚠️ 記錄時必須濾掉 Naki 自送的（msgId ≥ 60000），否則猜錯的嘗試值會被記成
-  「觀察到的真值」再變成預設，錯誤自我餵養（2026-08-09 踩過）。
+  ⚠️ 記錄時必須濾掉 Naki 自送的，否則猜錯的嘗試值會被記成「觀察到的真值」再變成預設，
+  錯誤自我餵養（2026-08-09 踩過）。判斷是 **msgId 登記制**而非號段：遊戲自己的 msgId
+  跑久了也會進 60000+。`LiqiMsgIdAllocator.isIssued`（未認領的 Naki 自送）或插件號段
+  （JS 自配發、不在登記表）＝ Naki 側（`LiqiEncoder.swift:257`、`LiqiParser.swift:188`）；
+  `LiqiResponseStore` 只收登記過的回應（`claim`，`LiqiResponseStore.swift:205`）。
 
 ## 平台差距
 
@@ -148,13 +151,14 @@ OptionalOperationList
 
 ## 自摸問題的 current truth
 
-resolver 純邏輯會讓 server tsumo／ron 凌駕 AI，且 13 個專項 tests 通過；但 integration 還有兩個 P0：
+resolver 純邏輯會讓 server tsumo／ron 凌駕 AI；下面兩個 integration P0 在 source 層都已收斂（有單測與注入式 fixture），**仍缺 live 對局驗證**：
 
 1. ~~主動作仍要求 recommendations 非空~~ **2026-08-07 修**：擋住伺服器授權和牌的其實有
    **三道**關卡，各自開了例外——`AutoPlayGate` 的 `notMyDiscardTurn`（榮和視窗的 oplist
    沒有 discard，而 stale 推薦是 discard）、`AutoPlayEngine` 輪詢路徑的 stale guard
    （自摸視窗）、手動路徑的 stale guard（MCP `bot_trigger`）。fixture F 三條 + 一條反向鎖
-   （沒有和牌機會時 stale 推薦仍然擋下），三次獨立 mutation 各自驗過。
+   （沒有和牌機會時 stale 推薦仍然擋下），三次獨立 mutation 各自驗過。手動路徑在推薦為空時，
+   只要 oplist 有和牌也會交給 resolver（`AutoPlayEngine.swift:577-582`、`BotTools.swift:64`）。
    **仍缺 live fixture。**
 2. ~~hora sender 沒把 `LiqiSendResult` 回給外層~~ 已收斂到 `AutoPlayActionExecutor`
    （回傳 `LiqiSendResult?`，只有 `success == true` 才 `markHandled`）。仍缺 live 驗證。
@@ -169,8 +173,8 @@ resolver 純邏輯會讓 server tsumo／ron 凌駕 AI，且 13 個專項 tests �
 
 ## MortalSwift／模型
 
-- 目前解到 0.5.1／`78b048e`；2026-08-02 remote 最高公開 tag 就是 v0.5.1，但 bundled Core ML 仍是固定 Mortal v4 四麻模型。
-- 上游本機另有 v0.5.2（移除 `PlayerState` 的 `isAllLast`／`isWRiichi`／`kansOnBoard`／`dorasOwned`／`dorasSeen`／`atIppatsu`，Naki 全都沒用到），但 **tag 還沒 push**。在 push 之前把 requirement 改成 `0.5.2` 會直接 resolve 失敗（`no versions of 'mortalswift' match the requirement 0.5.2..<0.6.0`），不是編譯期才炸。
+- 目前解到 0.5.2／`6223548`（`Package.resolved`）；bundled Core ML 仍是固定 Mortal v4 四麻模型。
+- 0.5.2 移除 `PlayerState` 的 `isAllLast`／`isWRiichi`／`kansOnBoard`／`dorasOwned`／`dorasSeen`／`atIppatsu`，Naki 全都沒用到。
 - observation `1012 × 34`，action mask 46。
 - libriichi parity 是兩套固定 fixtures 的逐格測試；Debug／Release 各 47 tests 通過，不是全狀態證明。
 - 0.5.x 沒換 model blobs；沒有千局級 strength benchmark。不得稱「最新最強模型」。
@@ -178,7 +182,19 @@ resolver 純邏輯會讓 server tsumo／ron 凌駕 AI，且 13 個專項 tests �
   `CloudBot(local: nil, …)`，bundled 四麻模型連建構都不呼叫。雲端不可用時那一手
   誠實無推薦，**不會**退回四麻模型（obs 1012×34 對三麻是結構性無效）。
   自動送出另有三層 fail-closed（gate 逐決策看 `cloudDecision`、resolver 降級、
-  `runManualCycle` 自己擋）。三麻仍**沒有 live 對局驗證**。
+  `runManualCycle` 自己擋），**但伺服器授權的和牌三層都放行**（和牌不需要模型）：
+  `AutoPlayGate.swift:86`、`AutoPlayDecisionResolver.swift:86-95`、`AutoPlayEngine.swift:570`。
+  其餘動作仍擋。三麻仍**沒有 live 對局驗證**。
+
+## 2026-09-30 審查修正後的行為
+
+以下都有單測（NakiTests 714 個 0 failures，2026-10-01 整合閘），**除非註明否則沒有 live 驗證**。
+
+- **背景保活**：`naki-core.js` 的 `__nakiKeepAlive`（隱藏時以計時器驅動 rAF、對頁面偽裝可見）＋ `WebSession` 的 tick 迴圈（`callJavaScript` 定期喚醒被系統暫停的 WebContent）；`SettingsStore.keepAliveInBackground` 預設開、設定頁可關。**live 效果未驗證**：短時間對照（隱藏 60 秒）開關的心跳一樣，長時間對照結果未定（見 `code-audit-implementation-notes.md`），之前不得宣稱有效。
+- **插件**：插件 script 只注入 main frame（`WebSession.swift:168`）；內建 WS 攔截仍是 `forMainFrameOnly: false`（`WebSocketInterceptor.swift:265`）。匯入的 `id`／`entry` 限 `[A-Za-z0-9._-]`（`PluginRegistry.isSafeName`／`isSafeEntry`），不合即 `manifestInvalid`。「檢查更新」先預覽再確認，確認前不落地（`PluginImportSource.swift:381`）。
+- **Debug server**（`DebugServer.swift`）：Origin 與 Host 由 `NakiMCPRequestGuard` 單一入口檢查，非 loopback 回 403（沒有 Host header 放行）；chunked 或「無 Content-Length 卻帶 body」回 411（無 body 的 POST 照常）；每連線 30 秒內必須收齊 request。`execute_js` 有 `timeout`（預設 30、上限 60，`UITools.swift:66`），逾時後頁面端 Promise 仍可能在跑。`/js` 回傳非 JSON 型別（Date 等）經 `JSONSanitizer` 轉字串，不再崩潰。以上 403／411／逾時**未對 live server 測**。
+- **負分**：`LiqiWire.decodeSignedVarint`（`LiqiEnvelope.swift:106`）讓 int32 欄位（scores）能解負數；`decodeVarint` 維持非負契約。
+- **分數／場風解析失敗**（例如超出 Int32、`chang`／`ju` 型別錯）：`MajsoulBridge.roundBlocked` 讓**本局**不餵 bot，但 `end_kyoku` 與 oplist 照常處理，所以伺服器授權的和牌仍會送（`MajsoulBridge.swift:514`）。
 
 ## WebGL 高亮
 
@@ -244,6 +260,12 @@ MCP 工具結果現在同時回 `structuredContent`（真的 JSON 物件）與 `
 | executor 是「7-case switch」 | 9 種動作 + unknown | 2026-08-07 |
 | 三麻仍送進四麻 model | 已改雲端-only，本地模型根本不建構 | 2026-08-07 |
 | liqi.json「與 CDN byte-identical」＝已驗證 | 那個 CDN 基準本身就過期 | 2026-08-07 |
+| `LiqiParser` 註解「負分 `parseVarint` 解得出來」 | 原本解不出來（10-byte varint 被 `shift >= 63` 拒絕），現以有號版本解 | 2026-09-30 |
+| 文件「Liqi generic protobuf tag 只讀一 byte，field > 31 會錯」 | `parseProtobufBlocks` 的 tag 早已是 varint（基準 `48add0a` 就是） | 2026-09-30 |
+| 程式把 `timeFixed`／`timeAdd` 當秒 | 單位是毫秒（同訊息推定，**未 live 驗證**），已改 | 2026-09-30 |
+| 「msgId ≥ 60000 ＝ Naki 自送」 | 遊戲自己的 msgId 跑久了也進 60000+；改為登記制 | 2026-09-30 |
+| 「log 保留 8 次」「三麻一律不自動送」 | 舊 session 可能只剩 `games/`；三麻的伺服器授權和牌照送 | 2026-09-30 |
+| `LiqiResponseStore` 的 error 一律在 field 1 | 20 個 Res 不是（如 `ResServerTime` 在 field 2），曾把「被拒」讀成成功 | 2026-09-30 |
 
 回答「目前是什麼狀態」一律以**執行中的 Naki loopback API、原始碼、或當場跑一次
 build/test** 為準；文件只用來解釋「為什麼是這樣」。改了行為就順手改文件——

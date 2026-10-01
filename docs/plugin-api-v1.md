@@ -59,9 +59,9 @@ window.__nakiPlugins.register({
 |---|---|---|
 | `schemaVersion` | ✅ | manifest 格式版本，目前固定 `1` |
 | `apiVersion` | ✅ | Hook API 版本。**exact match：不是 `1` 就整個不載入**（原因 `apiVersionUnsupported`）。Naki 不做 semver range |
-| `id` | ✅ | 反向網域命名。**必須與目錄名完全相同**，否則不載入 |
+| `id` | ✅ | 反向網域命名。**必須與目錄名完全相同**，否則不載入。字元集僅限 `[A-Za-z0-9._-]`，不得以 `.` 開頭、不得含 `..`，不合整個不載入 |
 | `name` / `version` | ✅ | 顯示用；`version` 建議 semver |
-| `entry` | ✅ | 進入點 JS 的相對路徑 |
+| `entry` | ✅ | 進入點 JS 的檔名：單一 `.js` 檔名，字元集同 `id`（不接受子目錄） |
 | `capabilities` | ✅ | 見 §5。空陣列＝什麼都不能做 |
 | `methods` | ✅ | **白名單**。只有列在這裡的 liqi method 會派發給你。空陣列＝這個插件不處理任何訊息（等於停用） |
 | `priority` | 選用 | 多插件時的鏈上順序，升冪；預設值由 Naki 定，同值按 id 字典序 |
@@ -110,7 +110,7 @@ ctx = {
   log(msg)  : void,                // 進 Naki 的 log，自動帶你的 id 前綴
 
   // 以下需要對應 capability，否則不存在或一律回 false：
-  replace(newBytes) : boolean,     // 需要 rewriteReceive / rewriteSend
+  replace(newBytes) : boolean,     // 需要 rewriteReceive / rewriteSend；isNaki 流量不提供
   drop()            : boolean,     // 需要 dropReceive / dropSend
   sendRequest(method, payloadBytes) : {ok, msgId} | {ok:false, reason}   // 需要 injectSend
 }
@@ -163,7 +163,7 @@ onReceive(ctx) {
 }
 ```
 
-整包替換走 `ctx.replace()`，receive 方向長度不等 ⇒ 回 `false` 且**不改任何 bytes**（fail-open，原樣通過）：
+整包替換走 `ctx.replace()`，receive 方向長度不等 ⇒ 回 `false` 且**不改任何 bytes**（fail-open，原樣通過）。替換後 Naki 會**重新解析** envelope：type／msgId／method 變了或落進禁改名單 ⇒ 還原原 bytes、計一次 `replace` 失敗並回 `false`。isNaki 流量不提供 `replace`：
 
 ```js
 const ok = ctx.replace(newBytes);
@@ -177,7 +177,7 @@ if (!ok) ctx.log('長度不等，放棄');
 具體的坑（Naki 已踩過，issue #2 根因）：Liqi wrapper 是 `{1: method, 2: payload}`，RESPONSE 的 field 1 是**空字串**，官方伺服器照寫（`0a 00`），但 canonical encoder 會省略預設值欄位，於是重編過的 RESPONSE 只剩 field 2。因此：
 
 1. `injectSend` / `rewriteSend` 產生的 REQUEST **必須自己寫出 field 1**（method 非空）。
-2. 重編 NOTIFY 時別省欄位——Naki 對 NOTIFY 是位置取法，省了會**顯式失敗**（`notEnoughBlocks`）。
+2. 重編 NOTIFY／REQUEST 時 **field 1（method）不能省**——Naki 三種 envelope 都按欄位號取（`LiqiEnvelope.swift:325-335`），缺 method 會**顯式失敗**（`notEnoughBlocks`）；field 2（payload）缺席則視為空。
 3. 「等長就地改」不會踩到這個；只有整包重編才會。
 
 ### 送 REQUEST 的四個協定事實（injectSend / rewriteSend）
@@ -201,7 +201,7 @@ L3 只能在使用者的**測試帳號**上用（Naki 的既有邊界）。
 
 ### msgId 號段（injectSend）
 
-你注入的 request 用 **64000–65500** 號段（Naki 自送的是 60000–63999，遊戲自己的是低位遞增）。這是 Naki 自動分配的，你不用管。
+你注入的 request 用 **64000–65500** 號段（Naki 自送的是 60000–63999，遊戲自己的是低位遞增，跑久了也可能進入 60000+）。Swift 端（`ObservedMatchSids`、`LiqiResponseStore`）判斷「是不是 Naki 自己送的」靠配發器登記（插件號段另計）；JS 端的 `ctx.isNaki` 仍是 `msgId >= 60000`。這是 Naki 自動分配的，你不用管。
 
 ### 收自己請求的回應（`onInjectResponse`）
 
@@ -257,7 +257,8 @@ manifest 宣告 schema，Naki 設定頁按 schema 自動渲染 UI，值存在 Na
 - **replace 換 buffer**：`replace()` 成功後，後續插件的 `ctx.bytes` 指向新 buffer。
 - **isNaki 分流**：Naki／插件自送的封包（`isNaki===true`）走**另一條只含 observer 的鏈**——只有在 manifest 宣告 `observeNakiTraffic: true` 且**僅** `observe` 的插件收得到，永遠不給 rewrite。
 - **錯誤隔離**：你的 hook throw ⇒ 這一則跳過你、記一行 log（同 id 同錯只記一次），**封包原樣通過**（fail-open）。其他插件不受影響。
-- **自動停用**：同一插件連續失敗 N 次（建議 10）⇒ 本次頁面生命週期內自動停用，UI 顯示原因。
+- **自動停用**：失敗計數**按 hook 分開**（`onReceive`／`onSend`／`onRecommendations`／`onInjectResponse`／`replace` 各算各的），某個 hook 連續失敗 10 次 ⇒ 該插件在本次頁面生命週期內整個停用；該 hook 成功一次（`replace` 以一次成功改寫算）就把它自己的計數歸零。
+- **注入範圍**：插件 script 只注入 main frame，不跑進第三方 iframe。
 
 ### 禁改名單（即使你有 `rewriteReceive`）
 
@@ -341,7 +342,7 @@ manifest 宣告 schema，Naki 設定頁按 schema 自動渲染 UI，值存在 Na
 
 gist 來源（`gist.github.com/<user>/<id>`）Naki 會自動釘 revision，取到不可變的快照。
 
-> Naki **不做**市集、推薦、自動更新。使用者按「檢查更新」＝重新走一次完整匯入流程（重抓、比對、重新確認）。Naki 不內建任何來源——你的插件能不能被找到，取決於你自己怎麼分發連結。
+> Naki **不做**市集、推薦、自動更新。使用者按「檢查更新」＝重新走一次完整匯入流程（重抓、比對內容 sha、有差異時列為待確認更新）；**使用者確認之前不會落地**。Naki 不內建任何來源——你的插件能不能被找到，取決於你自己怎麼分發連結。
 
 ---
 

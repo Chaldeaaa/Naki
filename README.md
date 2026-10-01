@@ -304,7 +304,7 @@ curl -X POST http://localhost:8765/bot/trigger
 curl -X POST http://localhost:8765/js -d 'return window.location.href'
 ```
 
-`/status` 會回傳日誌檔路徑；歷史日誌保留最近 5 次啟動。
+`/status` 會回傳日誌檔路徑；歷史日誌保留最近 8 次啟動的完整目錄；更舊的只留對局錄影（`games/`）。
 
 </details>
 
