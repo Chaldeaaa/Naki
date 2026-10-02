@@ -113,8 +113,8 @@ class LogManager {
     var traceToCategoryFiles = true
 
     /// 專用序列佇列：序列化所有檔案寫入。
-    /// log() 可能被任意執行緒（off-main 的 botLog / bridgeLog 等）呼叫，
-    /// 單一 FileHandle 併發 seek+write 並不安全，這裡用 serial queue 保證順序與資料完整。
+    /// log() 在 MainActor 上呼叫，寫檔丟到這條 serial queue 離開主執行緒；
+    /// 同一個 FileHandle 的 seek+write 靠它保證順序與資料完整。
     private let fileWriteQueue = DispatchQueue(label: "com.naki.LogManager.fileWrite")
 
     /// 檔案日誌路徑（對外公開，方便從 `/status` 或除錯時直接開檔查）
@@ -135,7 +135,7 @@ class LogManager {
     /// 這次啟動的 log 目錄
     let logDirectory: URL
 
-    /// 保留幾次執行的紀錄（不含當次）
+    /// 保留幾次執行的紀錄（含當次）
     private let sessionKeepCount = 8
 
     private init() {
@@ -182,7 +182,10 @@ class LogManager {
             categoryHandles[c] = try? FileHandle(forWritingTo: url)
         }
 
-        Self.pruneOldSessions(root: root, keep: sessionKeepCount)
+        // XCTest host 不輪替：它每次啟動都會跑一次，會刪掉同時在跑的正式 App 的目錄
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            Self.pruneOldSessions(root: root, keep: sessionKeepCount)
+        }
     }
 
     private static let sessionStampFormatter: DateFormatter = {
@@ -193,16 +196,26 @@ class LogManager {
         return f
     }()
 
-    /// 只留最近 N 次執行的目錄
+    /// 只留最近 N 次執行的完整目錄
     ///
     /// 目錄名是可排序的時間戳，所以字典序就是時間序，不需要讀 attributes。
-    private static func pruneOldSessions(root: URL, keep: Int) {
+    /// 超出保留數的舊 session：有 `games/` 錄影的只留 `games/`（`replay-check.sh` 要用，
+    /// 但大 log 不無限成長），沒有的整個刪除。
+    nonisolated static func pruneOldSessions(root: URL, keep: Int) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: root.path) else { return }
         let sessions = entries.filter { $0.count == 15 && $0.contains("-") }.sorted()
         guard sessions.count > keep else { return }
         for name in sessions.prefix(sessions.count - keep) {
-            try? fm.removeItem(at: root.appendingPathComponent(name))
+            let dir = root.appendingPathComponent(name)
+            let games = dir.appendingPathComponent("games")
+            guard ((try? fm.contentsOfDirectory(atPath: games.path)) ?? []).isEmpty == false else {
+                try? fm.removeItem(at: dir)
+                continue
+            }
+            for item in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where item != "games" {
+                try? fm.removeItem(at: dir.appendingPathComponent(item))
+            }
         }
     }
 
@@ -344,18 +357,27 @@ class LogManager {
 
             // 合併檔：排除 trace，否則事件會被解析細節淹沒
             if wantsMerged, let h = self.fileHandle {
-                h.seekToEndOfFile(); h.write(data)
+                Self.append(data, to: h)
             }
             // 事件時間軸
             if let eventTime, let h = self.eventHandle,
                let d = "\(eventTime) [\(category.rawValue)] \(message)\n".data(using: .utf8) {
-                h.seekToEndOfFile(); h.write(d)
+                Self.append(d, to: h)
             }
             // 各類別檔案：完整保留
             if wantsCategory, let h = self.categoryHandles[category] {
-                h.seekToEndOfFile(); h.write(data)
+                Self.append(data, to: h)
             }
         }
+    }
+
+    /// 舊的 `seekToEndOfFile()`／`write(_:)` 遇到 I/O 錯誤（磁碟滿、fd 失效）丟 ObjC 例外，
+    /// Swift 攔不到會直接 abort；寫不進 log 不該讓 App 跟著死，所以用會 throw 的版本並吞掉。
+    private nonisolated static func append(_ data: Data, to handle: FileHandle) {
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {}
     }
 }
 

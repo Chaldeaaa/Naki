@@ -144,9 +144,9 @@ nonisolated struct LiqiOperationSnapshot: Equatable {
     let seat: Int
     /// 可用操作清單
     let operations: [LiqiOperation]
-    /// 加時秒數
+    /// 加時毫秒數（live 友人房 `timeFixed` 為 300000；`timeAdd` 依同一訊息推定同單位，未驗證）
     let timeAdd: UInt32
-    /// 固定思考秒數
+    /// 固定思考毫秒數
     let timeFixed: UInt32
     /// 觸發這批操作的牌（他家打出的牌 / 自己摸到的牌，雀魂格式）
     let contextTile: String?
@@ -329,16 +329,17 @@ nonisolated final class LiqiOperationStore: @unchecked Sendable {
         }
 
         let operations: [LiqiOperation] = rawList.compactMap { entry in
-            guard let type = entry["type"] as? Int, type >= 0 else { return nil }
+            // 超界的 type 是解錯位，丟掉這筆（`UInt32(_:)` 超界會 trap）
+            guard let type = entry["type"] as? Int, let rawType = UInt32(exactly: type) else { return nil }
             let combination = entry["combination"] as? [String] ?? []
-            return LiqiOperation(rawType: UInt32(type), combination: combination)
+            return LiqiOperation(rawType: rawType, combination: combination)
         }
         guard !operations.isEmpty else { return nil }
 
         return record(seat: parsed["seat"] as? Int ?? -1,
                       operations: operations,
-                      timeAdd: UInt32(max(0, parsed["timeAdd"] as? Int ?? 0)),
-                      timeFixed: UInt32(max(0, parsed["timeFixed"] as? Int ?? 0)),
+                      timeAdd: UInt32(exactly: parsed["timeAdd"] as? Int ?? 0) ?? 0,
+                      timeFixed: UInt32(exactly: parsed["timeFixed"] as? Int ?? 0) ?? 0,
                       contextTile: contextTile,
                       source: source)
     }

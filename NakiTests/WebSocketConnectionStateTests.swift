@@ -165,4 +165,17 @@ final class WebSocketConnectionStateTests: XCTestCase {
         XCTAssertEqual(log.events, [true, false],
                        "重複的 connected 不該讓集合多出一條，否則關閉後會卡在 connected")
     }
+
+    /// 握手失敗的 socket（沒進過集合）關閉，不得再報一次 disconnected
+    func testClosingNeverRegisteredSocketDoesNotReAnnounceDisconnected() {
+        let (interceptor, log) = makeInterceptor()
+
+        close(interceptor, id: 9)
+        XCTAssertTrue(log.events.isEmpty, "集合本來就空，不是由非空轉空")
+
+        open(interceptor, id: 1, url: Self.gameSocket)
+        close(interceptor, id: 1)
+        close(interceptor, id: 9)
+        XCTAssertEqual(log.events, [true, false], "斷線只報一次")
+    }
 }

@@ -84,30 +84,19 @@ final class NakiRuntime {
             settings?.cloudConfig
         }
 
-        // ①-c 插件：掃描目錄，產出已啟用插件的注入源碼（掃描只讀檔，不執行任何插件程式碼）。
-        //     預設 `enabledPluginIds` 空 ⇒ 沒有啟用插件 ⇒ injection 為 nil ⇒ 不加第二個 script。
-        let descriptors = PluginRegistry.scan()
-        pluginStore.descriptors = descriptors
-        let settingsStore = settings
-        let pluginInjection = PluginRegistry.buildInjectionScript(
-            descriptors: descriptors, enabled: settings.enabledPluginIds,
-            mayModifyOutbound: settings.pluginsMayModifyOutbound,
-            overridesFor: { id in
-                guard let schema = descriptors.first(where: { $0.id == id })?.manifest?.settings
-                else { return [:] }
-                return settingsStore.pluginSettingOverrides(pluginId: id, keys: Array(schema.keys))
-            })
-
         // ② 頁面側：JS bridge 的收件人就是 coordinator 的 WS handler
         session = WebSession(store: store,
                              settings: settings,
-                             messageHandler: coordinator.websocketHandler,
-                             pluginInjection: pluginInjection)
+                             messageHandler: coordinator.websocketHandler)
 
         // ③ 互相接線（兩邊都不認得對方的型別，只認得協定）
         coordinator.observer = self
         session.lifecycle = coordinator
         settings.adoptAutoPlaySupport(session.supportsAutoPlay)
+
+        // 插件：掃描只讀檔，不執行插件程式碼；沒有啟用插件＝只注入 bundled。
+        pluginStore.descriptors = PluginRegistry.scan()
+        session.setPluginInjection(pluginInjection())
 
         configureLiqiSender()
         adoptStoredAutoPlayMode()
@@ -160,8 +149,8 @@ final class NakiRuntime {
 
     /// 沿用上次選的模式，並收斂到這條 path 真的能執行的值。
     ///
-    /// `commit` 會把收斂後的值寫回存檔：不寫的話 UI 的 `@AppStorage` 與這裡讀到的
-    /// 模式會不一致，picker 顯示「自動」而實際跑「推薦」。
+    /// `commit` 會把收斂後的值寫回存檔：不寫的話存檔與 runtime 生效的模式會不一致，
+    /// 下次啟動會讀回一個這條 path 跑不了的值。
     private func adoptStoredAutoPlayMode() {
         let stored = AutoPlayModeStore.load()
         store.autoPlayMode = AutoPlayAvailability.commit(
@@ -202,7 +191,7 @@ final class NakiRuntime {
                     // 推薦綁定的 oplist sequence：讓 .proceed 確認推薦與機會同源
                     recommendationsOplistSequence: self.store.recommendationsOplistSequence)
             },
-            log: { [weak self] message in self?.debugServer?.addLog(message) },
+            log: { [weak self] message in self?.logToStatusBar(message) },
             event: { [weak self] message in self?.logAutoPlayEvent(message) },
             // 「自動打牌不動作」上畫面的唯一一條路。其餘所有失敗訊息都只走 log，
             // 而 log 有去重（同一個原因只印一行）——故障越久痕跡越少。
@@ -254,23 +243,32 @@ final class NakiRuntime {
             },
             lobbyProbe: { [weak self] in
                 guard let self else { return false }
-                // 用 fetchAccountInfo 當探針：fetchServerTime 即使 session 正常也會被
-                // 伺服器拒（2026-08-01 實測），拿它當探針會永遠通不過。
+                // 探針沿用 fetchAccountInfo（2026-08-01 實測可用）；
+                // 曾記錄 fetchServerTime 會被拒，但當時 hasError 誤判 field 1，結論未經驗證。
                 let accountId = self.coordinator.websocketHandler.majsoulAccountId
                 guard accountId > 0 else { return false }
                 let spec = LiqiRequestBuilder.fetchAccountInfo(accountId: UInt32(accountId))
                 let outcome = await self.liqiSender.sendAwaitingResponse(spec, awaitResponseMs: 3000)
                 return outcome.response.map { !$0.hasError } == true
             },
-            log: { [weak self] message in self?.logAutoPlayEvent(message) })
+            log: { [weak self] message in self?.logAutoPlayEvent(message) },
+            onFailure: { [weak self] message in self?.store.statusMessage = message })
     }
 
-    /// 自動打牌的關鍵節點：同時進 Debug buffer 與 naki-events.log。
+    /// 自動打牌的關鍵節點：`eventLog` 一份（LogManager 與 naki-events.log 都收得到），外加狀態列。
     ///
     /// 這些是「為什麼這樣打／為什麼沒打」的唯一線索，不能混在 parser 細節裡。
+    /// 不經 `debugServer`：MCP server 停止時訊息不能消失；也不能再 `bridgeLog` 一次，
+    /// 否則每條事件在 log 出現兩次。
     private func logAutoPlayEvent(_ message: String) {
-        debugServer?.addLog(message)
         eventLog(message)
+        store.statusMessage = message
+    }
+
+    /// 一般 log ＋ 狀態列（與 `NakiMCPDependencies.log` 同語意，但不依賴 debugServer 存在）
+    private func logToStatusBar(_ message: String) {
+        bridgeLog(message)
+        store.statusMessage = message
     }
 
     /// 切換自動打牌模式（UI picker 與 MCP 共用同一個入口）。
@@ -281,13 +279,14 @@ final class NakiRuntime {
         store.autoPlayMode = effective
 
         if effective != mode {
-            store.statusMessage = "此裝置不支援自動送出，已改為推薦模式"
+            store.statusMessage = L10n.text("此裝置不支援自動送出，已改為推薦模式")
             bridgeLog("[Naki] 要求 \(mode.rawValue) → 降級為 \(effective.rawValue)："
                 + AutoPlayAvailability.autoUnavailableReason)
         } else {
             bridgeLog("[Naki] 自動打牌模式設定為: \(effective.rawValue)")
         }
-        debugServer?.addLog("模式已變更: \(effective.rawValue), 推薦數: \(store.recommendations.count)")
+        bridgeLog("模式已變更: \(effective.rawValue), 推薦數: \(store.recommendations.count)")
+        store.statusMessage = L10n.text("模式已變更: \(effective.localizedName), 推薦數: \(store.recommendations.count)")
 
         // 模式一改就要立刻反映在畫面上，不能等下一次 Bot 回應：
         // 切到 `.off` 時把遊戲內標記清掉，切回 `.recommend` / `.auto` 時重新染上。
@@ -364,7 +363,7 @@ final class NakiRuntime {
 
     func startDebugServer() {
         guard debugServer == nil else {
-            store.statusMessage = "MCP Server 已在運行"
+            store.statusMessage = L10n.text("MCP Server 已在運行")
             return
         }
 
@@ -378,7 +377,7 @@ final class NakiRuntime {
         debugServer?.stop()
         debugServer = nil
         store.isDebugServerRunning = false
-        store.statusMessage = "MCP Server 已停止"
+        store.statusMessage = L10n.text("MCP Server 已停止")
         systemLog("[生命週期] MCP Server 已停止")
     }
 
@@ -400,7 +399,12 @@ final class NakiRuntime {
     func setPluginEnabled(id: String, enabled: Bool) {
         if enabled { settings.enabledPluginIds.insert(id) }
         else { settings.enabledPluginIds.remove(id) }
+        session.setPluginInjection(pluginInjection())
+        hotApplyPlugin(id: id, enabled: enabled)
+    }
 
+    /// 只對當前頁面注入 enable／disable JS（不動持久化與 user script）。
+    private func hotApplyPlugin(id: String, enabled: Bool) {
         let script: String?
         if enabled {
             guard let descriptor = pluginDescriptors.first(where: { $0.id == id }),
@@ -420,9 +424,10 @@ final class NakiRuntime {
     }
 
     /// L3 總開關（§8.1）：持久化 + 對當前頁面即時注入新值（免 reload）。
-    /// 呼叫端（UI）負責在開啟前做一次性確認對話。
+    /// 呼叫端（UI）負責在由關轉開前做確認對話。
     func setPluginsMayModifyOutbound(_ on: Bool) {
         settings.pluginsMayModifyOutbound = on
+        session.setPluginInjection(pluginInjection())
         let js = "window.__nakiPluginsMayModifyOutbound = \(on ? "true" : "false");"
         Task { [weak self] in
             _ = try? await self?.session.callJavaScript(js)
@@ -431,17 +436,113 @@ final class NakiRuntime {
 
     /// 重掃插件目錄，更新 `pluginDescriptors`。@Observable ⇒ UI 自動反映。
     /// URL 匯入落地後、或使用者手動放檔案後呼叫。
+    ///
+    /// 已啟用的插件以新源碼熱重載，下次頁面載入的注入只重建一次。
+    /// 已啟用但消失或變無效的插件要從當前頁面卸掉；目錄整個不見的順便移出啟用清單，
+    /// 無效但目錄還在的保留，讓使用者修好後自動恢復。
     func rescanPlugins() {
+        PluginRegistry.removeStaleStaging()
         pluginStore.descriptors = PluginRegistry.scan()
+        let known = Set(pluginDescriptors.map(\.id))
+        let valid = Set(pluginDescriptors.filter(\.isValid).map(\.id))
+
+        // scan 讀不出根目錄時回 []，不能據此清掉啟用清單：只移除「目錄確實不存在」的 id
+        let enabled = settings.enabledPluginIds
+        if let root = PluginRegistry.pluginsDirectory {
+            let gone = enabled.subtracting(known).filter {
+                !FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path)
+            }
+            settings.enabledPluginIds.subtract(gone)
+        }
+        session.setPluginInjection(pluginInjection())
+        for id in enabled { hotApplyPlugin(id: id, enabled: valid.contains(id)) }
+    }
+
+    /// 逐一落地，有成功的就重掃（已啟用的會熱重載）。回傳失敗原因，成功的不列。
+    func installPlugins(_ plugins: [ImportedPlugin]) -> [String] {
+        let failures: [String] = plugins.compactMap { p in
+            if case .failure(let e) = PluginImportSource.install(p, now: Date()) { return "\(p.id)：\(e.text)" }
+            return nil
+        }
+        if failures.count < plugins.count { rescanPlugins() }
+        return failures
+    }
+
+    /// 重抓每個已安裝插件的 `updateSource`，列出有新版的（不安裝）。
+    func checkPluginUpdates() async -> [PluginUpdate] {
+        var found: [PluginUpdate] = []
+        for d in pluginDescriptors {
+            guard let fresh = await PluginImportSource.fetchUpdate(pluginId: d.id) else { continue }
+            found.append(PluginUpdate(fresh: fresh, installed: d.manifest))
+        }
+        return found
+    }
+
+    /// 檢查 App 有沒有新版。自動檢查受開關與 24 小時節流約束；手動（設定頁、App 選單）一律執行並回報結果。
+    func checkForUpdate(manual: Bool) async {
+        guard manual || UpdateChecker.shouldAutoCheck(
+            enabled: settings.autoCheckUpdate, last: settings.lastUpdateCheck, now: Date())
+        else { systemLog("[Update] 略過自動檢查（關閉或 24 小時內已查）"); return }
+
+        let latest: ReleaseInfo?
+        do {
+            latest = try await UpdateChecker.fetchLatest()
+        } catch {
+            systemLog("[Update] 檢查失敗：\(error.localizedDescription)")
+            if manual {
+                store.updateCheckResult = .failed
+                store.statusMessage = L10n.text("檢查失敗")
+            }
+            return
+        }
+        settings.lastUpdateCheck = Date()
+        systemLog("[Update] 最新 \(latest?.version ?? "—")，目前 \(NakiAppVersion.short)")
+
+        guard let info = latest,
+              UpdateChecker.shouldSurface(info, local: NakiAppVersion.short,
+                                          skipped: settings.skippedUpdateVersion, manual: manual)
+        else {
+            if manual {
+                store.updateCheckResult = .upToDate
+                store.statusMessage = L10n.text("已是最新版本")
+            }
+            return
+        }
+        store.availableUpdate = info
+        if manual { store.updateCheckResult = .available(info.version) }
+    }
+
+    /// 只有已啟用的插件才熱重載；未啟用時只存值。
+    func setPluginSetting(id: String, key: String, value: Any) {
+        settings.setPluginSettingValue(pluginId: id, key: key, value: value)
+        if settings.enabledPluginIds.contains(id) { setPluginEnabled(id: id, enabled: true) }
+    }
+
+    /// 以目前的插件目錄、啟用清單與設定組出頁面載入時的插件注入源碼（無啟用插件＝nil）。
+    private func pluginInjection() -> String? {
+        let descriptors = pluginDescriptors
+        return PluginRegistry.buildInjectionScript(
+            descriptors: descriptors, enabled: settings.enabledPluginIds,
+            mayModifyOutbound: settings.pluginsMayModifyOutbound,
+            overridesFor: { [settings] id in
+                guard let schema = descriptors.first(where: { $0.id == id })?.manifest?.settings
+                else { return [:] }
+                return settings.pluginSettingOverrides(pluginId: id, keys: Array(schema.keys))
+            })
     }
 
     /// 移除插件：先熱停用（從頁面卸掉 + 清 enabledPluginIds），再刪目錄，再重掃。
-    /// 可逆——重新匯入／放檔案即可救回。
+    /// 可逆——重新匯入／放檔案即可救回。刪除以掃描到的實際目錄為準（id 可能不等於目錄名）。
     func removePlugin(id: String) {
         if settings.enabledPluginIds.contains(id) {
             setPluginEnabled(id: id, enabled: false)   // 熱停用（免 reload 從頁面卸掉）
         }
-        _ = PluginRegistry.remove(id: id)
+        let error = pluginDescriptors.first(where: { $0.id == id })
+            .map { PluginRegistry.remove(directory: $0.directory) } ?? PluginRegistry.remove(id: id)
+        if let error {
+            systemLog("[Plugin] 移除 \(id) 失敗：\(error)")
+            store.statusMessage = L10n.text("移除插件失敗：\(error)")
+        }
         rescanPlugins()
     }
 
@@ -449,8 +550,13 @@ final class NakiRuntime {
         NakiActions(
             executeJavaScript: ExecuteJavaScriptAction(session: session),
             setPluginEnabled: SetPluginEnabledAction(runtime: self),
+            setPluginsMayModifyOutbound: SetPluginsMayModifyOutboundAction(runtime: self),
             rescanPlugins: RescanPluginsAction(runtime: self),
             removePlugin: RemovePluginAction(runtime: self),
+            installPlugins: InstallPluginsAction(runtime: self),
+            checkPluginUpdates: CheckPluginUpdatesAction(runtime: self),
+            checkForUpdate: CheckForUpdateAction(runtime: self),
+            setPluginSetting: SetPluginSettingAction(runtime: self),
             forceReconnect: ForceReconnectAction(session: session),
             setAutoPlayMode: SetAutoPlayModeAction(runtime: self),
             startFullAutoNow: StartFullAutoNowAction(runtime: self),
@@ -460,6 +566,8 @@ final class NakiRuntime {
             reloadPage: ReloadPageAction(session: session),
             switchServer: SwitchServerAction(session: session),
             setHidePlayerNames: SetHidePlayerNamesAction(session: session),
+            setKeepAliveInBackground: SetKeepAliveInBackgroundAction(session: session),
+            setAppLanguage: SetAppLanguageAction(settings: settings),
             webView: WebViewAction(session: session))
     }
 }

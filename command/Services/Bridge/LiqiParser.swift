@@ -13,6 +13,19 @@ import Foundation
 // wire 格式（varint / protobuf block / envelope）在 `LiqiEnvelope.swift`；
 // 本檔只負責「這則訊息在說什麼」——欄位語意與 liqi.json 的對照。
 
+// MARK: - Credential Methods
+
+/// 會帶密碼／token／驗證碼的方法：payload 只記長度，不落 hex 與字串值
+/// （`verfifyCodeForSecure` 是雀魂原本的拼字；誤傷只是少記 payload，可接受）
+nonisolated enum LiqiCredentialMethods {
+    private static let markers = ["ogin", "uth", "oken", "Beat", "assword", "ignup", "bind",
+                                  "erify", "erfify", "ecure", "Code"]
+
+    static func matches(_ method: String) -> Bool {
+        markers.contains { method.contains($0) }
+    }
+}
+
 // MARK: - XOR Decode Keys
 
 /// 雀魂 XOR 解碼密鑰
@@ -171,6 +184,13 @@ class LiqiParser {
         return result
     }
 
+    /// 這筆請求是不是 Naki（自送或插件注入）發的，而非遊戲自己。
+    nonisolated static func isNakiSent(msgId: Int) -> Bool {
+        guard let id = UInt16(exactly: msgId) else { return false }
+        return LiqiMsgIdAllocator.shared.isIssued(id)
+            || (LiqiMsgIdAllocator.pluginRangeStart...LiqiMsgIdAllocator.pluginRangeEnd).contains(id)
+    }
+
     private func parseRequest(msgId: Int, method: String, payload: Data) -> [String: Any]? {
         liqiLog("[LiqiParser] parseRequest msgId=\(msgId), method: \(method)")
 
@@ -193,10 +213,10 @@ class LiqiParser {
         // `lobby_start_unified_match` 送的就是這個方法。不濾掉的話，一次猜錯的
         // 嘗試值會被記成「觀察到的真值」，然後變成該工具不帶參數時的預設——
         // 錯誤自我餵養。2026-08-09 實測踩過：連續 8 次失敗嘗試（sid "1".."18"）
-        // 全被記進觀察表。判準沿用 `naki-websocket.js` 的既有慣例：Naki 自己送的
-        // msgId 一律落在 60000+ 號段。
+        // 全被記進觀察表。Naki 自送的以配發器登記判斷（遊戲自己的 msgId 跑久了也會進
+        // 60000+，不能看號段）；插件區段（JS 自配發，不在登記表）仍以號段排除。
         if method == LiqiRequestBuilder.startUnifiedMatchMethod,
-           msgId < Int(LiqiMsgIdAllocator.rangeStart) {
+           !Self.isNakiSent(msgId: msgId) {
             let sid = parseStringField(payload, field: 1) ?? ""
             let version = parseStringField(payload, field: 2) ?? ""
             if !sid.isEmpty {
@@ -204,6 +224,11 @@ class LiqiParser {
                     ObservedMatchSids.shared.record(sid: sid, clientVersionString: version)
                 }
             }
+        }
+
+        // 取消匹配（不論誰送的）：不會再有對局開出來，別讓下一局友人房被回填成這個 sid 的人數
+        if method == LiqiRequestBuilder.cancelUnifiedMatchMethod || method == LiqiRequestBuilder.cancelMatchMethod {
+            Task { @MainActor in ObservedMatchSids.shared.cancelAwaitingGameKind() }
         }
 
         var result: [String: Any] = [
@@ -225,7 +250,7 @@ class LiqiParser {
         // RESPONSE 的 envelope 不帶方法名，只能靠 msgId 對回 REQUEST；對不上就沒得解。
         guard let methodName = pendingRequests.removeValue(forKey: msgId) else {
             liqiLog("[LiqiParser] parseResponse: no pending request for msgId=\(msgId)"
-                    + "，payload preview: \(liqiHexPreview(payload))")
+                    + "，payload \(payload.count) bytes")
             return nil
         }
 
@@ -246,12 +271,15 @@ class LiqiParser {
     /// 取出某個 field 的所有 varint 值（repeated uint32 用）
     ///
     /// protobuf 的 repeated 標量可能是 packed 也可能逐筆出現；
-    /// `mode_list` 實測是逐筆（每個值一個 field 1 block）。
+    /// `mode_list` 實測是逐筆（每個值一個 field 1 block），packed 也接。
     private func parseRepeatedVarint(_ data: Data, field: Int) -> [Int] {
         parseProtobufBlocks(data)
-            .filter { $0.fieldId == field && $0.wireType == 0 }
-            .compactMap { block in
-                parseVarint(block.data, offset: 0).map { Int($0.0) }
+            .filter { $0.fieldId == field }
+            .flatMap { block -> [Int] in
+                if block.wireType == 0 {
+                    return parseVarint(block.data, offset: 0).map { [$0.value] } ?? []
+                }
+                return block.wireType == 2 ? parsePackedVarints(block.data, decode: LiqiWire.decodeVarint) ?? [] : []
             }
     }
 
@@ -268,9 +296,13 @@ class LiqiParser {
     private func parseInnerMessage(methodName: String, data: Data, isResponse: Bool = false) -> [String: Any]? {
         // 調試：顯示內部消息原始數據
         liqiLog("[LiqiParser] parseInnerMessage: method=\(methodName), dataSize=\(data.count)")
-        liqiLog("[LiqiParser] parseInnerMessage raw: \(liqiHexPreview(data, limit: 80))")
-
+        // 登入類訊息的 payload 帶 access_token／oauth code：trace 只記 method 與長度，
+        // 不落 hex 與字串值（liqi.log 會被用戶貼去回報問題）。REQUEST 與其 RESPONSE 同一個 method 名。
+        let isCredential = LiqiCredentialMethods.matches(methodName)
         let innerBlocks = parseProtobufBlocks(data)
+        if !isCredential {
+            liqiLog("[LiqiParser] parseInnerMessage raw: \(liqiHexPreview(data, limit: 80))")
+        }
         liqiLog("[LiqiParser] parseInnerMessage: \(innerBlocks.count) inner blocks")
 
         // 顯示每個內部塊。
@@ -281,7 +313,7 @@ class LiqiParser {
         if isTraceLogging {
             for (i, block) in innerBlocks.enumerated() {
                 liqiLog("[LiqiParser] innerBlock[\(i)]: fieldId=\(block.fieldId), wireType=\(block.wireType), size=\(block.data.count)")
-                if block.wireType == 2 {
+                if block.wireType == 2 && !isCredential {
                     if let str = block.stringValue, str.count < 50 {
                         liqiLog("[LiqiParser] innerBlock[\(i)] string: \(str)")
                     } else {
@@ -465,14 +497,10 @@ class LiqiParser {
 
         for block in blocks {
             switch block.fieldId {
-            case 1: // chang (場)
-                if let (v, _) = parseVarint(block.data, offset: 0) {
-                    result["chang"] = v
-                }
+            case 1: // chang (場)；缺席 = 0（proto3 預設值不上線），由呼叫端補
+                result["chang"] = varintOrInvalid(block, site: "ActionNewRound.chang", fieldId: 1)
             case 2: // ju (局)
-                if let (v, _) = parseVarint(block.data, offset: 0) {
-                    result["ju"] = v
-                }
+                result["ju"] = varintOrInvalid(block, site: "ActionNewRound.ju", fieldId: 2)
             case 3: // ben (本場)
                 if let (v, _) = parseVarint(block.data, offset: 0) { result["ben"] = v }
             case 4: // tiles (手牌) - repeated string，每個 block 都是一張牌
@@ -499,7 +527,8 @@ class LiqiParser {
                 // 與「這段 bytes 解不開」在呼叫端長得一模一樣。
                 if let parsed = parseRepeatedVarintField(block,
                                                          site: "ActionNewRound.scores",
-                                                         fieldId: 6) {
+                                                         fieldId: 6,
+                                                         signed: true) {
                     scores.append(contentsOf: parsed)
                 } else {
                     scoresFailed = true
@@ -745,19 +774,22 @@ class LiqiParser {
             case 2: // old_scores（repeated int32）
                 if let parsed = parseRepeatedVarintField(block,
                                                          site: "ActionHule.old_scores",
-                                                         fieldId: 2) {
+                                                         fieldId: 2,
+                                                         signed: true) {
                     oldScores.append(contentsOf: parsed)
                 }
             case 3: // delta_scores（repeated int32）
                 if let parsed = parseRepeatedVarintField(block,
                                                          site: "ActionHule.delta_scores",
-                                                         fieldId: 3) {
+                                                         fieldId: 3,
+                                                         signed: true) {
                     deltaScores.append(contentsOf: parsed)
                 }
             case 5: // scores（repeated int32；和牌後的點數）
                 if let parsed = parseRepeatedVarintField(block,
                                                          site: "ActionHule.scores",
-                                                         fieldId: 5) {
+                                                         fieldId: 5,
+                                                         signed: true) {
                     scores.append(contentsOf: parsed)
                 }
             case 7: // doras（repeated string）
@@ -1005,13 +1037,22 @@ class LiqiParser {
     ///            同時記一筆 `LiqiParseFault`。
     private func parseRepeatedVarintField(_ block: ProtobufBlock,
                                           site: String,
-                                          fieldId: Int) -> [Int]? {
+                                          fieldId: Int,
+                                          signed: Bool = false) -> [Int]? {
+        let decode = signed ? LiqiWire.decodeSignedVarint : LiqiWire.decodeVarint
         if block.wireType == 0 {
-            guard let (value, _) = parseVarint(block.data, offset: 0) else {
+            guard let (value, _) = decode(block.data, 0) else {
                 recordFault(site: site,
                             fieldId: fieldId,
                             byteCount: block.data.count,
                             reason: "varint 解不出來：\(hexPreview(block.data))")
+                return nil
+            }
+            guard !signed || Int32(exactly: value) != nil else {
+                recordFault(site: site,
+                            fieldId: fieldId,
+                            byteCount: block.data.count,
+                            reason: "int32 超出範圍：\(value)")
                 return nil
             }
             return [value]
@@ -1025,11 +1066,18 @@ class LiqiParser {
             return nil
         }
 
-        guard let values = parsePackedVarints(block.data) else {
+        guard let values = parsePackedVarints(block.data, decode: decode) else {
             recordFault(site: site,
                         fieldId: fieldId,
                         byteCount: block.data.count,
                         reason: "packed varint 解不出來：\(hexPreview(block.data))")
+            return nil
+        }
+        guard !signed || values.allSatisfy({ Int32(exactly: $0) != nil }) else {
+            recordFault(site: site,
+                        fieldId: fieldId,
+                        byteCount: block.data.count,
+                        reason: "packed int32 超出範圍：\(hexPreview(block.data))")
             return nil
         }
         return values
@@ -1038,14 +1086,16 @@ class LiqiParser {
     /// packed repeated 數值：整段 bytes 必須剛好解成一串 varint。
     ///
     /// 有任何一個 byte 落單就代表這段不是我們以為的東西 → 回 nil。
-    /// 負數（int32）在 wire 上是 10 bytes 的 64-bit 二補數，`parseVarint` 解得出來。
-    private func parsePackedVarints(_ data: Data) -> [Int]? {
+    /// 負數（int32）在 wire 上是 10 bytes 的 64-bit 二補數，只有 `decodeSignedVarint` 解得出來；
+    /// 無號欄位（seat_list 等）維持 `decodeVarint` 的非負契約。
+    private func parsePackedVarints(_ data: Data,
+                                    decode: (Data, Int) -> (value: Int, newOffset: Int)?) -> [Int]? {
         guard !data.isEmpty else { return nil }
 
         var values: [Int] = []
         var offset = 0
         while offset < data.count {
-            guard let (value, newOffset) = parseVarint(data, offset: offset) else {
+            guard let (value, newOffset) = decode(data, offset) else {
                 return nil
             }
             values.append(value)
@@ -1214,9 +1264,9 @@ class LiqiParser {
         for block in blocks {
             switch block.fieldId {
             case 1: // chang
-                if let (v, _) = parseVarint(block.data, offset: 0) { result["chang"] = v }
+                result["chang"] = varintOrInvalid(block, site: "GameSnapshot.chang", fieldId: 1)
             case 2: // ju
-                if let (v, _) = parseVarint(block.data, offset: 0) { result["ju"] = v }
+                result["ju"] = varintOrInvalid(block, site: "GameSnapshot.ju", fieldId: 2)
             case 3: // ben
                 if let (v, _) = parseVarint(block.data, offset: 0) { result["ben"] = v }
             case 4: // index_player
@@ -1263,19 +1313,34 @@ class LiqiParser {
     }
 
     /// 從 `PlayerSnapshot` 取點數（liqi.json `.lq.GameSnapshot.PlayerSnapshot`：1=score int32）
+    ///
+    /// proto3 預設值不上線：score 為 0 時欄位會被省略（代理重新序列化同理），缺席解讀為 0；
+    /// 只有型別錯誤或超出 int32 才算失敗。
     private func parsePlayerSnapshotScore(_ data: Data) -> Int? {
-        for block in parseProtobufBlocks(data) where block.fieldId == 1 {
-            if let (score, _) = parseVarint(block.data, offset: 0) { return score }
+        guard let block = parseProtobufBlocks(data).last(where: { $0.fieldId == 1 }) else { return 0 }
+
+        if block.wireType == 0,
+           let (score, _) = LiqiWire.decodeSignedVarint(block.data, offset: 0),
+           Int32(exactly: score) != nil {
+            return score
         }
 
         recordFault(site: "GameSnapshot.players.score",
                     fieldId: 9,
                     byteCount: data.count,
-                    reason: "PlayerSnapshot 缺少 score：\(hexPreview(data))")
+                    reason: "PlayerSnapshot score 不是合法 int32：\(hexPreview(data))")
         return nil
     }
 
     // MARK: - Helper Methods
+
+    /// 場風／局數欄位：型別錯誤回 -1（超出範圍，讓呼叫端的範圍守衛擋下這一局）並記 fault
+    private func varintOrInvalid(_ block: ProtobufBlock, site: String, fieldId: Int) -> Int {
+        if block.wireType == 0, let (v, _) = parseVarint(block.data, offset: 0) { return v }
+        recordFault(site: site, fieldId: fieldId, byteCount: block.data.count,
+                    reason: "預期 varint，實際 wireType \(block.wireType)")
+        return -1
+    }
 
     private func parseOperation(_ data: Data) -> [String: Any] {
         let blocks = parseProtobufBlocks(data)

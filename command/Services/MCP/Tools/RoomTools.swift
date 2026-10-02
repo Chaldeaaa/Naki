@@ -80,18 +80,18 @@ struct RoomCreateTool: MCPTool {
 
         var config = LiqiFriendRoomConfig()
         config.playerCount = UInt32(playerCount)
-        config.mode = UInt32(max(0, arguments["mode"] as? Int ?? 2))
-        config.timeFixed = UInt32(max(0, arguments["time_fixed"] as? Int ?? 300))
-        config.timeAdd = UInt32(max(0, arguments["time_add"] as? Int ?? 0))
-        config.doraCount = UInt32(max(0, arguments["dora_count"] as? Int ?? 3))
-        config.shiduan = UInt32(max(0, arguments["shiduan"] as? Int ?? 1))
-        config.initPoint = UInt32(max(0, arguments["init_point"] as? Int ?? 25000))
-        config.fandian = UInt32(max(0, arguments["fandian"] as? Int ?? 30000))
+        config.mode = try MCPArguments.uint32(arguments, "mode", default: 2)
+        config.timeFixed = try MCPArguments.uint32(arguments, "time_fixed", default: 300)
+        config.timeAdd = try MCPArguments.uint32(arguments, "time_add")
+        config.doraCount = try MCPArguments.uint32(arguments, "dora_count", default: 3)
+        config.shiduan = try MCPArguments.uint32(arguments, "shiduan", default: 1)
+        config.initPoint = try MCPArguments.uint32(arguments, "init_point", default: 25000)
+        config.fandian = try MCPArguments.uint32(arguments, "fandian", default: 30000)
         config.publicLive = arguments["public_live"] as? Bool ?? false
         config.enableAI = arguments["enable_ai"] as? Bool ?? false
         config.clientVersionString = arguments["client_version_string"] as? String ?? ""
         if let aiLevel = arguments["ai_level"] as? Int, aiLevel >= 0 {
-            config.aiLevel = UInt32(aiLevel)
+            config.aiLevel = try MCPArguments.uint32(aiLevel, "ai_level")
         }
 
         let spec = LiqiRequestBuilder.createRoom(config: config)
@@ -148,7 +148,7 @@ struct RoomAddRobotTool: MCPTool {
         guard let nakiContext = context as? NakiMCPContext else {
             throw MCPToolError.notAvailable("Naki context")
         }
-        let position = UInt32(max(0, arguments["position"] as? Int ?? 0))
+        let position = try MCPArguments.uint32(arguments, "position")
         let spec = LiqiRequestBuilder.addRoomRobot(position: position)
         let outcome = await nakiContext.sendLiqi(spec,
                                                  awaitResponseMs: arguments["awaitResponseMs"] as? Int ?? 1500)
@@ -255,7 +255,7 @@ struct RoomJoinTool: MCPTool {
             throw MCPToolError.notAvailable("Naki context")
         }
         let spec = LiqiRequestBuilder.joinRoom(
-            roomId: UInt32(roomId),
+            roomId: try MCPArguments.uint32(roomId, "room_id"),
             clientVersionString: arguments["client_version_string"] as? String ?? "")
         let outcome = await nakiContext.sendLiqi(spec,
                                                  awaitResponseMs: arguments["awaitResponseMs"] as? Int ?? 2000)
@@ -355,10 +355,10 @@ struct RoomQuickTestTool: MCPTool {
         // 1. 建房
         var config = LiqiFriendRoomConfig()
         config.playerCount = UInt32(playerCount)
-        config.timeFixed = UInt32(max(0, arguments["time_fixed"] as? Int ?? 60))
-        config.timeAdd = UInt32(max(0, arguments["time_add"] as? Int ?? 0))
+        config.timeFixed = try MCPArguments.uint32(arguments, "time_fixed", default: 60)
+        config.timeAdd = try MCPArguments.uint32(arguments, "time_add")
         if let aiLevel = arguments["ai_level"] as? Int, aiLevel >= 0 {
-            config.aiLevel = UInt32(aiLevel)
+            config.aiLevel = try MCPArguments.uint32(aiLevel, "ai_level")
         }
         let createSpec = LiqiRequestBuilder.createRoom(config: config)
         let created = record("room_create",

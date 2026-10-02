@@ -11,8 +11,8 @@
 //    window.__nakiPluginGrants = { id: {...} };   // 先設
 //    window.__nakiPlugins.register({ id, onReceive, ... });   // 插件自己呼叫
 //
-//  Phase 1 只支援 observe（唯讀）。rewriteReceive / injectSend 屬 Phase 2/3，
-//  ctx 目前不提供 replace / drop / sendRequest。
+//  observe 唯讀；rewriteReceive → ctx.replace（等長就地改寫，isNaki 流量不給）、
+//  injectSend → ctx.sendRequest（受 L3 總開關把關）。沒有 drop。
 //
 (function () {
     'use strict';
@@ -40,7 +40,8 @@
 
     // 已註冊插件：id -> { spec, grant }
     var registry = new Map();
-    // 連續失敗計數：id -> Number（達上限自動停用本頁面生命週期）
+    // 連續失敗計數：id -> { hook名: Number }（同一個 hook 連續達上限才自動停用；
+    // 別的 hook 成功不能沖掉它，否則永遠拋錯的 onReceive 會被正常的 onRecommendations 蓋掉）
     var failures = new Map();
     var FAILURE_LIMIT = 10;
     var diagnostics = { dispatches: 0, parsed: 0, hooks: 0, lastMethod: null,
@@ -101,17 +102,24 @@
     }
 
     // 只在需要時報一次某插件的內部錯誤，避免對局時間軸被洗版
-    function noteFailure(id, err) {
+    function noteFailure(id, hook, err) {
         diagnostics.lastError = { id: id, message: String(err && err.message || err) };
-        var n = (failures.get(id) || 0) + 1;
-        failures.set(id, n);
-        pluginLog(id, 'hook 拋錯（第 ' + n + ' 次）：' + (err && err.message ? err.message : err));
+        var f = failures.get(id) || {};
+        var n = (f[hook] || 0) + 1;
+        f[hook] = n;
+        failures.set(id, f);
+        pluginLog(id, hook + ' 拋錯（第 ' + n + ' 次）：' + (err && err.message ? err.message : err));
         if (n >= FAILURE_LIMIT) {
             var entry = registry.get(id);
             registry.delete(id);
             cleanup(entry);
             pluginLog(id, '連續失敗達 ' + FAILURE_LIMIT + ' 次，本頁面生命週期內停用');
         }
+    }
+
+    function noteSuccess(id, hook) {
+        var f = failures.get(id);
+        if (f) f[hook] = 0;
     }
 
     // ---- 輕量 envelope 解析（自包含，不依賴 naki-websocket 的私有符號）----
@@ -221,11 +229,12 @@
             ctx.settings = grant.settings;
         }
 
-        // Phase 2：rewriteReceive → ctx.replace（等長就地改寫）。
-        // 只在「有 rewriteReceive capability + receive 方向 + method 不在禁改名單」時掛。
+        // rewriteReceive → ctx.replace（等長就地改寫）。
+        // 只在「有 rewriteReceive capability + receive 方向 + 非 Naki 流量 + method 不在禁改名單」時掛。
         // raw.bytes 是遊戲那份 buffer 的 view，set 就地改 ⇒ 遊戲與 Naki 都看到改後的。
         var caps = grant.capabilities || [];
         if (raw.direction === 'receive'
+            && !isNaki
             && raw.mutable !== false
             && caps.indexOf('rewriteReceive') !== -1
             && !isForbiddenMethod(method, grant)) {
@@ -235,12 +244,24 @@
                     || newBytes.length !== raw.bytes.length) {
                     return false;   // fail-open：長度不等 ⇒ 不改、原樣通過
                 }
+                var original = raw.bytes.slice();
                 try {
                     raw.bytes.set(newBytes);
-                    return true;
                 } catch (e) {
                     return false;
                 }
+                // 等長改寫可以把整個 envelope 換掉：改後重新解析，method 變了或落進禁改名單
+                // 就還原並計一次失敗（禁改名單只擋改寫前的 method 等於沒擋）。
+                var after = parseEnvelope(raw.bytes);
+                var afterMethod = after && (after.method || method);
+                if (!after || after.type !== env.type || after.msgId !== env.msgId
+                    || afterMethod !== method || isForbiddenMethod(afterMethod, grant)) {
+                    raw.bytes.set(original);
+                    noteFailure(grant.__id, 'replace', new Error('改寫換掉了 method 或觸及禁改名單，已還原'));
+                    return false;
+                }
+                noteSuccess(grant.__id, 'replace');
+                return true;
             };
         }
 
@@ -324,7 +345,7 @@
             // 把 id 綁進 grant 供 ctx.log 使用（不動原物件語意）
             grant.__id = spec.id;
             registry.set(spec.id, { spec: spec, grant: grant });
-            failures.set(spec.id, 0);
+            failures.set(spec.id, {});
             pluginLog(spec.id, 'registered（capabilities=' + (grant.capabilities || []).join(',') + '）');
 
             // 高亮類插件不應該等下一個 WebSocket 封包才看見已經算好的推薦。
@@ -334,7 +355,7 @@
                 try {
                     spec.onRecommendations(makeRecommendationCtx(grant, window.__nakiRecommendations));
                 } catch (e) {
-                    noteFailure(spec.id, e);
+                    noteFailure(spec.id, 'onRecommendations', e);
                 }
             }
             return true;
@@ -344,7 +365,7 @@
         // raw = { direction:'send'|'receive', wsId:Number, url:String, bytes:Uint8Array }
         dispatch: function (raw) {
             diagnostics.dispatches++;
-            if (!raw || !raw.bytes) return;
+            if (registry.size === 0 || !raw || !raw.bytes) return;
 
             var env = parseEnvelope(raw.bytes);
             if (!env) return;
@@ -365,8 +386,8 @@
                     var rctx = makeCtx(raw, env, method, isNaki, origin.grant);
                     rctx.inResponseTo = env.msgId;
                     rctx.timedOut = false;
-                    try { origin.spec.onInjectResponse(rctx); }
-                    catch (e) { noteFailure(originId, e); }
+                    try { origin.spec.onInjectResponse(rctx); noteSuccess(originId, 'onInjectResponse'); }
+                    catch (e) { noteFailure(originId, 'onInjectResponse', e); }
                 }
                 return;   // 注入回應不進一般鏈
             }
@@ -394,15 +415,16 @@
 
             for (var k = 0; k < chain.length; k++) {
                 var entry = chain[k];
-                var fn = raw.direction === 'receive' ? entry.spec.onReceive : entry.spec.onSend;
+                var hook = raw.direction === 'receive' ? 'onReceive' : 'onSend';
+                var fn = entry.spec[hook];
                 if (typeof fn !== 'function') continue;
                 var ctx = makeCtx(raw, env, method, isNaki, entry.grant);
                 try {
                     diagnostics.hooks++;
-                    fn(ctx);   // Phase 1 observe：回傳值忽略，ctx 無 replace/drop（改不到封包）
-                    failures.set(entry.spec.id, 0);
+                    fn(ctx);   // 回傳值忽略；改寫只能經 ctx.replace（見 makeCtx）
+                    noteSuccess(entry.spec.id, hook);
                 } catch (e) {
-                    noteFailure(entry.spec.id, e);
+                    noteFailure(entry.spec.id, hook, e);
                 }
             }
         },
@@ -417,9 +439,9 @@
                 try {
                     diagnostics.recommendationHooks++;
                     entry.spec.onRecommendations(makeRecommendationCtx(entry.grant, recs, context));
-                    failures.set(id, 0);
+                    noteSuccess(id, 'onRecommendations');
                 } catch (e) {
-                    noteFailure(id, e);
+                    noteFailure(id, 'onRecommendations', e);
                 }
             });
         },

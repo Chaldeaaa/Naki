@@ -302,6 +302,24 @@ final class CloudBotTests: XCTestCase {
         XCTAssertEqual(CloudMockURLProtocol.captured.count, 4)
     }
 
+    /// Retry-After 是第三方可控的輸入：負數／NaN／Inf 曾讓 `UInt64(seconds * 1e9)` trap
+    func test_reachSecondCall429_hostileRetryAfter_doesNotCrash() async throws {
+        for header in ["-1", "nan", "-inf", "inf", "1e300"] {
+            CloudMockURLProtocol.reset(script: [
+                (200, #"{"reaction":{"type":"reach","actor":0},"candidates":[],"model":"4p-x"}"#, [:]),
+                (429, #"{"error":"rate limited"}"#, ["Retry-After": header]),
+                (200, #"{"reaction":{"type":"dahai","actor":0,"pai":"9p","tsumogiri":false},"#
+                    + #""candidates":[{"action":"dahai:9p","prob":0.8}],"model":"4p-x"}"#, [:]),
+            ])
+            let local = StubEngine()
+            let bot = makeCloudBot(local: local)
+            try await feedOpening(bot)
+            let result = try await decide(bot, local: local, reaction: localDahai("1m"))
+            XCTAssertEqual(result?.source, "cloud:4p-x", "Retry-After: \(header) 應視同缺席並重試")
+            XCTAssertEqual(CloudMockURLProtocol.captured.count, 3)
+        }
+    }
+
     // MARK: 重連重放抑制
 
     func test_resyncSuppression_skipsCloudForReplayedEvents_thenResumes() async throws {
@@ -391,7 +409,7 @@ final class CloudBotTests: XCTestCase {
                                      apiKey: "SECRETKEY",
                                      model4P: "", model3P: "3p-x")
             },
-            serverAuthorization: { authorized },
+            serverAuthorization: { _ in authorized },
             clientConfiguration: config)
     }
 
@@ -429,6 +447,41 @@ final class CloudBotTests: XCTestCase {
         XCTAssertEqual(CloudMockURLProtocol.captured.count, 1)
     }
 
+    /// 同一批事件共用同一個 seq，決策事件不是第一個：非決策事件不得消耗 seq，
+    /// 否則雲端被問在 `start_kyoku`／`reach_accepted` 上（視窗尾巴不是決策點），
+    /// 真正的決策事件被「同 seq 已問過」跳過。
+    func test_cloudOnly_nonDecisionEventsDoNotConsumeSequence() async throws {
+        let seq = UInt64(9)
+        for prefix in [["type": "start_kyoku", "kyoku": 1] as [String: Any],
+                       ["type": "reach_accepted", "actor": 1]] {
+            CloudMockURLProtocol.reset(script: [
+                (200, #"{"reaction":{"type":"kita","actor":0,"pai":"N"},"#
+                    + #""candidates":[{"action":"nukidora","prob":0.5}],"model":"3p-x"}"#, [:]),
+            ])
+            let bot = makeCloudOnlyBot()
+            _ = try await bot.react(events: [["type": "start_game", "id": 0,
+                                              "names": ["A", "B", "C"]]])
+            _ = try await bot.react(events: [["type": "start_kyoku", "kyoku": 1]])
+
+            var first = prefix
+            first[MJAIEventKey.oplistSequence] = seq
+            let skipped = try await bot.react(events: [first])
+            XCTAssertNil(skipped)
+            XCTAssertTrue(CloudMockURLProtocol.captured.isEmpty,
+                          "\(prefix["type"] ?? "?") 不是決策點，不得問雲端")
+
+            let decision = try await bot.react(events: [
+                ["type": "tsumo", "actor": 0, "pai": "N", MJAIEventKey.oplistSequence: seq]])
+            XCTAssertEqual(decision?.source, "cloud:3p-x", "同批的 tsumo 才是決策點")
+            XCTAssertEqual(CloudMockURLProtocol.captured.count, 1)
+
+            // 同 seq 的後續事件仍只問一次
+            _ = try await bot.react(events: [
+                ["type": "tsumo", "actor": 0, "pai": "1m", MJAIEventKey.oplistSequence: seq]])
+            XCTAssertEqual(CloudMockURLProtocol.captured.count, 1)
+        }
+    }
+
     /// 雲端失敗＝本手誠實沒有推薦（不會有本地無效輸出頂上）
     func test_cloudOnly_failureYieldsNoRecommendation() async throws {
         CloudMockURLProtocol.reset(script: [(500, #"{"error":"boom"}"#, [:])])
@@ -448,6 +501,60 @@ final class CloudBotTests: XCTestCase {
         let reaction = try await bot.react(events: [
             ["type": "tsumo", "actor": 0, "pai": "N",
              MJAIEventKey.oplistSequence: UInt64(3)]])
+        XCTAssertNil(reaction)
+        XCTAssertTrue(CloudMockURLProtocol.captured.isEmpty)
+    }
+
+    // MARK: syncGame 重放（授權已被取代的過期決策點）
+
+    /// 重放的歷史決策：seq 早被後續動作取代（只有最新那批仍是 pending）→ 不問雲端，
+    /// 只有最後一個（當前）決策點才問。四麻走本地引擎當閘門，三麻走雲端-only。
+    func test_staleAuthorization_skipsCloud_onlyCurrentDecisionAsks() async throws {
+        CloudMockURLProtocol.reset(script: [
+            (200, #"{"reaction":{"type":"dahai","actor":0,"pai":"5p","tsumogiri":true},"#
+                + #""candidates":[],"model":"4p-x"}"#, [:]),
+        ])
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudMockURLProtocol.self]
+        let local = StubEngine()
+        let bot = CloudBot(
+            local: local, playerId: 0, is3P: false,
+            configProvider: {
+                CloudInferenceConfig(enabled: true, baseURL: "http://mock.test",
+                                     apiKey: "SECRETKEY", model4P: "4p-x", model3P: "")
+            },
+            serverAuthorization: { $0 == 9 },
+            clientConfiguration: config)
+        try await feedOpening(bot)
+
+        func tsumo(seq: UInt64) -> [[String: Any]] {
+            [["type": "tsumo", "actor": 0, "pai": "1m", MJAIEventKey.oplistSequence: seq]]
+        }
+        local.script = [localDahai("1m"), localDahai("2m")]
+        let stale = try await bot.react(events: tsumo(seq: 5))
+        XCTAssertEqual(stale?.source, "local", "過期授權的歷史決策沿用本地")
+        XCTAssertTrue(CloudMockURLProtocol.captured.isEmpty)
+
+        let current = try await bot.react(events: tsumo(seq: 9))
+        XCTAssertEqual(current?.source, "cloud:4p-x")
+        XCTAssertEqual(CloudMockURLProtocol.captured.count, 1)
+    }
+
+    func test_cloudOnly_staleAuthorizationSkipsCloud() async throws {
+        CloudMockURLProtocol.reset(script: [])
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CloudMockURLProtocol.self]
+        let bot = CloudBot(
+            local: nil, playerId: 0, is3P: true,
+            configProvider: {
+                CloudInferenceConfig(enabled: true, baseURL: "http://mock.test",
+                                     apiKey: "SECRETKEY", model4P: "", model3P: "3p-x")
+            },
+            serverAuthorization: { $0 == 9 },
+            clientConfiguration: config)
+        try await feedSanmaOpening(bot)
+        let reaction = try await bot.react(events: [
+            ["type": "tsumo", "actor": 0, "pai": "N", MJAIEventKey.oplistSequence: UInt64(5)]])
         XCTAssertNil(reaction)
         XCTAssertTrue(CloudMockURLProtocol.captured.isEmpty)
     }

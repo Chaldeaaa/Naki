@@ -160,3 +160,24 @@ final class BotAvailableActionsTests: XCTestCase {
         XCTAssertFalse(gameStore.botStatus.canAgari)
     }
 }
+
+// MARK: - 立直後再推論的合併規則
+
+final class ReachRecommendationMergeTests: XCTestCase {
+    private func rec(_ tile: String, _ p: Double, _ type: Recommendation.ActionType = .discard) -> Recommendation {
+        Recommendation(tile: tile, probability: p, actionType: type)
+    }
+
+    func testDeclarationReplacesDiscardsAndKeepsRiichiFirst() {
+        let base = [rec("5m", 0.6), rec("reach", 0.3, .riichi), rec("9p", 0.1)]
+        let declaration = [rec("9p", 0.7), rec("5m", 0.3)]
+        let merged = BundledCoreMLBot.mergingDeclaration(declaration, into: base)
+        XCTAssertEqual(merged.map(\.actionType), [.riichi, .discard, .discard])
+        XCTAssertEqual(merged.dropFirst().map(\.probability), [0.7, 0.3])
+    }
+
+    func testEmptyDeclarationFallsBackToBase() {
+        let base = [rec("5m", 0.6), rec("reach", 0.3, .riichi)]
+        XCTAssertEqual(BundledCoreMLBot.mergingDeclaration([], into: base), base)
+    }
+}

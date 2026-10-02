@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.11.0-green" alt="Version">
+  <img src="https://img.shields.io/badge/version-2.14.0-green" alt="Version">
   <img src="https://img.shields.io/badge/macOS-26.0+-blue" alt="macOS">
   <img src="https://img.shields.io/badge/iOS-17.0+-blue" alt="iOS">
   <img src="https://img.shields.io/badge/Apple%20Silicon-required-red" alt="Architecture">
@@ -304,7 +304,7 @@ curl -X POST http://localhost:8765/bot/trigger
 curl -X POST http://localhost:8765/js -d 'return window.location.href'
 ```
 
-`/status` 會回傳日誌檔路徑；歷史日誌保留最近 5 次啟動。
+`/status` 會回傳日誌檔路徑；歷史日誌保留最近 8 次啟動的完整目錄；更舊的只留對局錄影（`games/`）。
 
 </details>
 

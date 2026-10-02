@@ -37,6 +37,9 @@ era 由請求自己決定，不靠連線狀態——這正是 2026-07-28 的 sta
 - 參數錯誤回 Tool Execution Error（`isError: true`），不是 protocol error——模型可以自己改參數重試。
 - JSON-RPC batch（陣列 body）明確拒絕（`-32600`）。
 - 非 loopback `Origin` 一律 403（**所有** Debug endpoint，不只 `/mcp`）；沒帶 Origin 的 curl／MCP client 不受影響。
+- `Host` 也檢查（擋 DNS rebinding）：只接受 `127.0.0.1`／`localhost`／`[::1]`，其餘回 403；沒帶 Host（HTTP/1.0）放行。
+- 沒有 `Content-Length` 卻帶 body、或用 `Transfer-Encoding: chunked`，回 411（沒有 body 的 POST 照常放行）。
+- 一條連線必須在 30 秒內收滿整個 request，否則直接斷線（不回應）。
 
 未實作且不打算實作：Authorization／OAuth、Roots／Sampling／Logging（已 Deprecated）、Tasks extension、MRTR、`subscriptions/listen`、session 與 SSE resumability。
 
@@ -71,7 +74,7 @@ Repo agent 應先讀 `.claude/skills/naki-mcp-proxy/SKILL.md`，讓 proxy 先做
 | `get_logs` | 近期記憶體 log（來源 LogManager，時間排序） |
 | `clear_logs` | 清除記憶體 log（檔案 log 不動） |
 | `replay_list` | 列出已錄的對局 |
-| `replay_game` | 重跑錄影的決策 |
+| `replay_game` | 重跑錄影的決策；`file` 只接受 `~/Library/Logs/Naki/` 底下的檔（解析 symlink 與 `..` 後比對），否則參數錯誤 |
 
 ### Bot（7）
 
@@ -85,6 +88,14 @@ Repo agent 應先讀 `.claude/skills/naki-mcp-proxy/SKILL.md`，讓 proxy 先做
 | `bot_pon` | 送出 pon |
 | `bot_sync` | 強制 WebSocket reconnect／重建 Bot |
 
+`bot_trigger` 的回傳只代表「排進引擎下一輪」，不代表已送出：
+
+| 回傳 | 意義 |
+|------|------|
+| `success: true, queued: true` | 已排入；引擎那一輪仍可能因三麻 fail-closed（和牌除外）、stale、Legacy path 不送，結果看 `bot_status`／`get_logs` |
+| `success: false, error: "no_recommendation", queued: false` | 目前沒有推薦**且** oplist 沒有和牌授權，擋下、沒排入（有和牌授權時即使無推薦也會排入，交給 resolver 和牌） |
+| `success: false, error: "no_oplist", queued: false` | 伺服器沒有授權的 oplist，擋下、沒排入 |
+
 ### 遊戲狀態／動作（6）
 
 | Tool | 作用 |
@@ -93,14 +104,14 @@ Repo agent 應先讀 `.claude/skills/naki-mcp-proxy/SKILL.md`，讓 proxy 先做
 | `game_hand` | 手牌與推薦 |
 | `game_ops` | 可用操作 |
 | `game_discard` | 以牌字串 discard |
-| `game_action` | 送一般 action |
+| `game_action` | 送一般 action；`hora` 只在 `game_ops` 有自摸／榮和授權時送出，否則回錯誤 |
 | `game_action_verify` | 送 action 並等 RESPONSE／snapshot 前進 |
 
 ### JavaScript（1）
 
 | Tool | 作用 |
 |------|------|
-| `execute_js` | 在 WebView 執行 function body；取值必須 `return` |
+| `execute_js` | 在 WebView 執行 function body；取值必須 `return`。`timeout` 秒數（預設 30，上限 60），逾時回錯誤但頁面端 Promise 可能仍在背景執行 |
 
 ### 大廳（8）
 
@@ -249,6 +260,7 @@ return JSON.stringify({
 ## 資料語意與限制
 
 - 工具結果讀 `structuredContent`；`content[0].text` 只是同一份 JSON 的字串化 fallback。腳本不要再對回應做 `tr -d '\\'`。
+- 整數參數超出目標型別範圍（例如 `UInt32`）回參數錯誤；負數夾成 0。
 - `outputSchema` 只宣告程式碼保證的欄位，其餘 `additionalProperties: true`——它是契約，不是完整欄位清單。
 - `game_state`／`game_hand`／`game_ops` 讀 Naki 的 Swift protocol state，不是 server 完整查詢。
 - `game_action_verify` 比單純 send 更好，但仍應針對終局動作確認 `ActionHule`。

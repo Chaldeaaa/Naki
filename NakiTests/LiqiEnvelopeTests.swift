@@ -127,15 +127,47 @@ final class LiqiEnvelopeTests: XCTestCase {
         XCTAssertTrue("\(failure)".contains("9"), "失敗訊息要帶得出 type：\(failure)")
     }
 
-    /// REQUEST 少了 payload block → 顯式失敗（不得回半個信封）
-    func testRequestWithoutPayloadBlockFails() {
+    /// REQUEST 少了 method block → 顯式失敗（不得回半個信封）
+    func testRequestWithoutMethodBlockFails() {
         var frame: [UInt8] = [LiqiMsgType.request.rawValue, 0x01, 0x00]
-        frame += LiqiEncoder.encodeStringField(field: 1, value: ".lq.Lobby.fetchRoom")
+        frame += LiqiEncoder.encodeLengthDelimited(field: 2, bytes: [0x08, 0x01])
 
         guard case let .failure(failure) = LiqiEnvelope.decode(Data(frame)) else {
-            return XCTFail("只有 method block 不算完整 wrapper")
+            return XCTFail("沒有 method 不算完整 wrapper")
         }
         XCTAssertTrue("\(failure)".contains("block"), "\(failure)")
+    }
+
+    /// NOTIFY／REQUEST 的 payload 缺席（重新序列化的封包省略預設值欄位）視為空 payload，
+    /// 與 RESPONSE 一致，不得因為「只有一個 block」而失敗。
+    func testNotifyAndRequestWithoutPayloadDecodeAsEmpty() {
+        let notify = [LiqiMsgType.notify.rawValue] + LiqiEncoder.encodeStringField(field: 1, value: ".lq.NotifyX")
+        guard case let .success(envelope) = LiqiEnvelope.decode(Data(notify)) else {
+            return XCTFail("只有 field 1 的 NOTIFY 必須解得開")
+        }
+        XCTAssertEqual(envelope.method, ".lq.NotifyX")
+        XCTAssertTrue(envelope.payload.isEmpty)
+
+        let request = [LiqiMsgType.request.rawValue, 0x01, 0x00]
+            + LiqiEncoder.encodeStringField(field: 1, value: ".lq.Lobby.fetchRoom")
+        guard case let .success(requestEnvelope) = LiqiEnvelope.decode(Data(request)) else {
+            return XCTFail("只有 field 1 的 REQUEST 必須解得開")
+        }
+        XCTAssertTrue(requestEnvelope.payload.isEmpty)
+    }
+
+    /// payload 按欄位號取：field 2 在前、field 1 在後也解得對
+    func testNotifyFieldsAreReadByFieldNumberNotPosition() {
+        let payload: [UInt8] = [0x08, 0x05]
+        let frame = [LiqiMsgType.notify.rawValue]
+            + LiqiEncoder.encodeLengthDelimited(field: 2, bytes: payload)
+            + LiqiEncoder.encodeStringField(field: 1, value: ".lq.NotifyX")
+
+        guard case let .success(envelope) = LiqiEnvelope.decode(Data(frame)) else {
+            return XCTFail("欄位順序顛倒仍是合法 protobuf")
+        }
+        XCTAssertEqual(envelope.method, ".lq.NotifyX")
+        XCTAssertEqual([UInt8](envelope.payload), payload)
     }
 
     // MARK: - varint 只有一份實作
@@ -197,5 +229,60 @@ final class LiqiEnvelopeTests: XCTestCase {
             XCTAssertLessThanOrEqual(encoded.count, 9, "測資本身必須在 9 bytes 內")
             XCTAssertEqual(LiqiWire.decodeVarint(Data(encoded), offset: 0)?.value, value)
         }
+    }
+
+    // MARK: - 有號 varint（int32／int64 負數）
+
+    /// 2026-09 live：`ActionHule.delta_scores` 的 packed bytes，負分是 10 bytes 二補數
+    func testSignedVarintDecodesLiveDeltaScores() {
+        let live = bytes(fromHex: "00ecc3ffffffffffffff0100943c")
+
+        var values: [Int] = []
+        var offset = 0
+        while offset < live.count {
+            guard let (value, next) = LiqiWire.decodeSignedVarint(live, offset: offset) else {
+                return XCTFail("live bytes 必須解得完")
+            }
+            values.append(value)
+            offset = next
+        }
+        XCTAssertEqual(values, [0, -7700, 0, 7700])
+    }
+
+    func testSignedVarintRoundTripsAndMatchesUnsignedForNonNegative() {
+        for value in [0, 1, 300, 25000, -1, -7700, Int(Int32.min), Int(Int32.max)] {
+            let encoded = LiqiEncoder.encodeVarint(UInt64(bitPattern: Int64(value)))
+            XCTAssertEqual(LiqiWire.decodeSignedVarint(Data(encoded), offset: 0)?.value, value)
+        }
+        for value in [0, 127, 128, 300, 1 << 40] {
+            let data = Data(LiqiWire.encodeVarint(UInt64(value)))
+            XCTAssertEqual(LiqiWire.decodeSignedVarint(data, offset: 0)?.value,
+                           LiqiWire.decodeVarint(data, offset: 0)?.value)
+        }
+    }
+
+    /// 第 10 個 byte 大於 1 超過 64 bits，是畸形；無號版本仍一律拒絕負數
+    func testSignedVarintRejectsMalformedTenthByte() {
+        let tooBig = Data([0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02])
+        XCTAssertNil(LiqiWire.decodeSignedVarint(tooBig, offset: 0))
+        XCTAssertNil(LiqiWire.decodeSignedVarint(Data(repeating: 0xFF, count: 12), offset: 0))
+        XCTAssertNil(LiqiWire.decodeSignedVarint(Data([0xFF, 0xFF]), offset: 0), "沒有結尾")
+
+        let negative = Data(LiqiEncoder.encodeVarint(UInt64(bitPattern: -1)))
+        XCTAssertNil(LiqiWire.decodeVarint(negative, offset: 0), "無號版本的非負契約不得破壞")
+    }
+
+    /// 切 block 要跳得過 10-byte varint：負數欄位之後的欄位不得丟失
+    func testNegativeVarintFieldDoesNotDropFollowingFields() {
+        let data = Data(LiqiEncoder.encodeFields([
+            .int(field: 1, value: -7700),
+            .string(field: 2, value: "after"),
+            .varint(field: 3, value: 9)
+        ]))
+
+        let blocks = parseProtobufBlocks(data)
+
+        XCTAssertEqual(blocks.map(\.fieldId), [1, 2, 3])
+        XCTAssertEqual(blocks[1].stringValue, "after")
     }
 }

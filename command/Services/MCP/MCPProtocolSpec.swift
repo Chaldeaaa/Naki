@@ -354,18 +354,64 @@ enum NakiMCPOriginPolicy {
 
     /// 被擋下時的回應 body（規格允許放一個沒有 id 的 JSON-RPC error）
     nonisolated static func forbiddenBody(origin: String?) -> String {
-        let failure = NakiMCPFailure(
-            code: -32600,
-            message: "Forbidden origin: \(origin ?? "unknown")",
-            data: nil,
-            httpStatus: 403
-        )
+        forbiddenJSON("Forbidden origin: \(origin ?? "unknown")")
+    }
+
+    /// Origin／Host 兩道檢查共用的 403 body
+    nonisolated fileprivate static func forbiddenJSON(_ message: String) -> String {
+        let failure = NakiMCPFailure(code: -32600, message: message, data: nil, httpStatus: 403)
         let payload: [String: Any] = ["jsonrpc": "2.0", "error": failure.errorObject]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
               let text = String(data: data, encoding: .utf8) else {
-            return "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Forbidden origin\"}}"
+            return "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Forbidden\"}}"
         }
         return text
+    }
+}
+
+/// Host header 檢查（DNS rebinding 防護的另一半）。
+///
+/// rebinding 之後攻擊者頁面與 server 同源，`GET /logs` 不帶 Origin，Origin 檢查看不到；
+/// 但 Host 仍是攻擊者的網域。port 任意（8765 被佔用時會往上找）。
+/// 沒有 Host 的請求放行：瀏覽器一定會送，所以放行只會讓 HTTP/1.0 的 curl 過，不會開洞。
+enum NakiMCPHostPolicy {
+
+    nonisolated static func isAllowed(_ hostHeader: String?) -> Bool {
+        guard let raw = hostHeader?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return true }
+        let host: Substring
+        if raw.hasPrefix("[") {
+            // IPv6 字面值：`[::1]` 或 `[::1]:8765`
+            guard let close = raw.firstIndex(of: "]") else { return false }
+            host = raw[raw.startIndex...close]
+        } else {
+            host = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        }
+        return NakiMCPOriginPolicy.loopbackHosts.contains(host.lowercased())
+    }
+
+    nonisolated static func forbiddenBody(host: String?) -> String {
+        NakiMCPOriginPolicy.forbiddenJSON("Forbidden host: \(host ?? "unknown")")
+    }
+}
+
+/// Origin＋Host 兩道檢查的單一入口（`DebugServer.handleRequest` 對所有 endpoint 套用）。
+///
+/// 抽成純函式是為了能單測；`MCPToolHardeningTests` 另外鎖住 DebugServer 真的有呼叫它。
+enum NakiMCPRequestGuard {
+
+    /// 被擋下時回 (log 原因, 403 body)；放行回 nil。
+    nonisolated static func rejection(lines: [String]) -> (reason: String, body: String)? {
+        let origin = NakiHTTPHeaderReader.value("origin", in: lines)
+        guard NakiMCPOriginPolicy.isAllowed(origin) else {
+            return ("Rejected non-loopback origin: \(origin ?? "?")",
+                    NakiMCPOriginPolicy.forbiddenBody(origin: origin))
+        }
+        let host = NakiHTTPHeaderReader.value("host", in: lines)
+        guard NakiMCPHostPolicy.isAllowed(host) else {
+            return ("Rejected non-loopback host: \(host ?? "?")",
+                    NakiMCPHostPolicy.forbiddenBody(host: host))
+        }
+        return nil
     }
 }
 

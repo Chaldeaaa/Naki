@@ -29,9 +29,9 @@
 | 9 | `Naki/akagi.entitlements` 目前不生效 | 已驗證 | `grep -c CODE_SIGN_ENTITLEMENTS project.pbxproj` → **0**。該檔只出現在 `Naki-MUITests` 的 Compile Sources membershipExceptions（`project.pbxproj:232`），沒有任何 target 以 `CODE_SIGN_ENTITLEMENTS` 指向它 |
 | 10 | iOS target 沒有開檔案分享 | 已驗證 | `grep UIFileSharing\|LSSupportsOpeningDocumentsInPlace project.pbxproj` → 0 命中；全部 target 都是 `GENERATE_INFOPLIST_FILE = YES`，repo 內找不到任何 `Info.plist` |
 | 11 | JS 模組只從 `Bundle` 讀，不讀外部檔案 | 已驗證 | `WebSocketInterceptor.swift:178-201`（`bundle.url(forResource:...)`），`:167-170` 模組清單只有 `naki-core`、`naki-websocket` |
-| 12 | 注入是 `atDocumentStart` + `forMainFrameOnly: false`，且全有或全無 | 已驗證 | `WebSocketInterceptor.swift:249-276`（`createUserScript`）、`:204-236`（`buildInjection`：任一模組失敗就整批不注入） |
-| 13 | Naki 自送 request 的 msgId 落在 60000–65500 | 已驗證 | `LiqiEncoder.swift:203-249`（`LiqiMsgIdAllocator`，`rangeStart = 60000`、`rangeEnd = 65500`） |
-| 14 | 有兩處以 60000 為界判斷「這是遊戲自己送的」 | 已驗證 | `naki-websocket.js:400`（`if (msgId >= 60000) return;`）、`LiqiParser.swift:198-199`（`msgId < Int(LiqiMsgIdAllocator.rangeStart)`） |
+| 12 | 內建腳本注入是 `atDocumentStart` + `forMainFrameOnly: false`，且全有或全無；**插件 script 只注入 main frame**（`forMainFrameOnly: true`，2026-09-30） | 已驗證 | `WebSocketInterceptor.swift:204-236`（`buildInjection`：任一模組失敗就整批不注入）、`:265`（`forMainFrameOnly: false`）；插件：`WebSession.swift:168` |
+| 13 | Naki 自送 request 的 msgId 落在 60000–63999，插件 64000–65500 | 已驗證 | `LiqiEncoder.swift:208-219`（`rangeStart = 60000`、`rangeEnd = 63999`、`pluginRangeStart/End`） |
+| 14 | JS 端以 60000 為界判斷「這是遊戲自己送的」；Swift 端已改**登記制**（2026-09-30） | 已驗證 | `naki-websocket.js:400`（`if (msgId >= 60000) return;`）；Swift：`LiqiParser.isNakiSent`（`LiqiParser.swift:188`，`isIssued` 或插件號段） |
 | 15 | 受端就地改 bytes 必須等長 | 已驗證 | `naki-websocket.js:172-174` 的既有註解與 `writeLabel`（`:304-312`）的實作：長度不足就降級成更短標籤再補空白，從不改變 byte 數 |
 | 16 | Naki 的 Swift 側看到的是**改寫後**的 bytes | 已驗證 | `naki-websocket.js:439-449`：先 `nakiNicknameMask.observe(...)`（就地改）再 `arrayBufferToBase64(data)`。TypedArray 分支（`:450-462`）同理 |
 | 17 | Naki 自己送出的封包會回流經過 `ws.send` hook | 已驗證 | `naki-websocket.js:144-148`（`ws.send` 被包裝，先 `handleMessage` 再 `originalSend`）；`sendRaw` 呼叫的正是這個被包裝的 `ws.send`（`:593`、`:613`）。`LiqiActionSender.swift:19-25` 檔頭也依賴這個事實 |
@@ -489,10 +489,10 @@ Naki 的 listener 在 `new WebSocket()` 當下就註冊（`naki-websocket.js:106
 
 ### 7.6 msgId：與既有 60000 號段的相處
 
-有**兩處**現行邏輯以 60000 為界判斷「這一筆是遊戲自己送的」（§0 #14）：
+有**兩處**邏輯判斷「這一筆是遊戲自己送的」（§0 #14）：
 
-- `naki-websocket.js:400`：`if (msgId >= 60000) return;`——不把 Naki 自送的請求當作選線證據
-- `LiqiParser.swift:198-199`：`msgId < LiqiMsgIdAllocator.rangeStart`——`ObservedMatchSids` 只學遊戲自己送的 sid。CLAUDE.md 記載 2026-08-09 踩過這個坑：不濾掉會讓猜錯的嘗試值被記成「觀察到的真值」，錯誤自我餵養
+- `naki-websocket.js:400`：`if (msgId >= 60000) return;`——不把 Naki 自送的請求當作選線證據（仍以號段判斷）
+- `LiqiParser.isNakiSent`（`LiqiParser.swift:188`）：**2026-09-30 起改為登記制**——`LiqiMsgIdAllocator.isIssued` 或落在插件號段（64000–65500，JS 自配發、不在登記表）即視為 Naki 側；原因是遊戲自己的 msgId 跑久了也會進 60000+。`ObservedMatchSids` 只學遊戲自己送的 sid。CLAUDE.md 記載 2026-08-09 踩過這個坑：不濾掉會讓猜錯的嘗試值被記成「觀察到的真值」，錯誤自我餵養
 
 **設計**：插件的 msgId 不另開新號段，而是**切分現有的 Naki 號段**：
 
@@ -502,7 +502,7 @@ Naki 的 listener 在 `new WebSocket()` 當下就註冊（`naki-websocket.js:106
 | Naki 自送 | **60000–63999** | `LiqiMsgIdAllocator.rangeEnd` 由 `65500` 改為 `63999` |
 | 插件注入 | **64000–65500** | 新增第二個 allocator 實例 |
 
-這樣**上面兩處判準一個字都不用改**（插件送的仍然 `>= 60000`，仍然不會被誤認成遊戲自己送的），同時 Naki 又能分辨「這筆是我送的還是插件送的」。
+這樣**JS 端判準不用改**（插件送的仍然 `>= 60000`，仍然不會被誤認成遊戲自己送的；Swift 端則靠插件號段排除），同時 Naki 又能分辨「這筆是我送的還是插件送的」。
 
 如果反過來給插件低於 60000 的號段，兩處判準都會把插件送出的請求當成「遊戲自己送的」——`ObservedMatchSids` 會把插件送的 `startUnifiedMatch` 記成觀察到的真值，`attributeSend` 會拿它當選線證據。**這是一個具體的、會靜默污染狀態的錯誤設計，不要做。**
 
@@ -865,14 +865,14 @@ GPL-3.0 §7 同一段還接著寫（已驗證，§0 #4c）：
 | `sendRaw`（全域可呼叫，§8.3 的破口） | 同上 `:543-622` |
 | JS 模組清單與 Bundle-only 載入 | `command/Services/Bridge/WebSocketInterceptor.swift:167-201` |
 | 全有或全無的注入 | 同上 `:204-236` |
-| `createUserScript`（atDocumentStart / 非僅主 frame） | 同上 `:249-276` |
+| `createUserScript`（atDocumentStart / 非僅主 frame；插件 script 另為僅主 frame：`WebSession.swift:168`） | 同上 `:249-276` |
 | `BridgeMessageType` 契約（switch 無 default） | 同上 `:310-317`、`:409-438` |
 | 未知 type 去重器 | 同上 `:327-349` |
 | `WKUserContentController` 組裝與 user script 加入 | `command/Services/Web/WebSession.swift:120-150` |
 | `callJavaScript` 函式體語意 | 同上 `:161-163` |
 | 送出鏈接線（`sendRaw` 的呼叫端） | `command/App/NakiRuntime.swift:114-136` |
-| `LiqiMsgIdAllocator` 60000–65500 | `command/Services/Bridge/LiqiEncoder.swift:203-249` |
-| `ObservedMatchSids` 的 `< 60000` 守衛 | `command/Services/Bridge/LiqiParser.swift:189-207` |
+| `LiqiMsgIdAllocator` 60000–63999（插件 64000–65500） | `command/Services/Bridge/LiqiEncoder.swift:208-260` |
+| `ObservedMatchSids` 的 Naki 自送守衛（`isNakiSent`，登記制） | `command/Services/Bridge/LiqiParser.swift:188,219` |
 | `MajsoulBridge.parse` / `parseRaw` | `command/Services/Bridge/MajsoulBridge.swift:139-144`、`:223-237` |
 | `MJAIEventStream.emit`（Swift 唯讀 hook 點） | `command/Services/Bridge/MJAIEventStream.swift:98-109` |
 | 契約測試掃 bundle 內 JS 原始碼 | `NakiTests/BridgeMessageContractTests.swift:36-51` |

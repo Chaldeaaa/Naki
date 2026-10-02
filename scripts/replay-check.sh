@@ -106,6 +106,8 @@ if "decisions" not in o:
     print(f"{name}\tTOOL_ERROR\t{str(o)[:120]}")
     sys.exit(0)
 ds = o["decisions"]
+if o.get("truncated"):
+    print(f"⚠️ {name}: 決策數達 limit=500，後面的決策沒有納入指紋", file=sys.stderr)
 # 決策指紋：事件序 + 動作，用來跟 baseline 比對
 fp = hashlib.sha256(
     "\n".join(f"{d['index']}:{d['event']}:{json.dumps(d['action'], sort_keys=True)}" for d in ds)
@@ -123,6 +125,14 @@ echo
 total_decisions=$(awk -F'\t' '{s+=$3} END {print s+0}' "$OUT/summary.txt")
 total_errors=$(awk -F'\t' '{s+=$4} END {print s+0}' "$OUT/summary.txt")
 echo "合計: $total_decisions 個決策, $total_errors 個錯誤"
+
+# 整局 TOOL_ERROR／PARSE_ERROR 的列沒有數字欄位，上面的合計會把它當 0 個錯誤；
+# 有任何一局根本沒跑成，就不能算通過，也不能存成 baseline
+failed=$(awk -F'\t' '$2=="TOOL_ERROR" || $2=="PARSE_ERROR" {n++} END {print n+0}' "$OUT/summary.txt")
+if [ "$failed" -gt 0 ]; then
+  echo "✗ $failed 局沒有跑成（TOOL_ERROR／PARSE_ERROR）；詳見 $OUT/replay-*.json"
+  exit 1
+fi
 
 if [ -n "$SAVE" ]; then
   cp "$OUT/summary.txt" "$SAVE"

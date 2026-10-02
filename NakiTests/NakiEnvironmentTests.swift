@@ -193,6 +193,21 @@ final class SettingsStoreTests: XCTestCase {
             UserDefaults.standard.bool(forKey: SettingsStore.hidePlayerNamesKey))
     }
 
+    /// 背景保活預設開；未設定過的 key 不能落到 `UserDefaults.bool` 的 false。用獨立 suite，不碰 `.standard`。
+    func testKeepAliveInBackgroundDefaultsToOnAndHonorsPersistedValue() throws {
+        let name = "naki.tests.keepAlive.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+
+        XCTAssertTrue(SettingsStore.loadKeepAliveInBackground(from: defaults))
+
+        defaults.set(false, forKey: SettingsStore.keepAliveInBackgroundKey)
+        XCTAssertFalse(SettingsStore.loadKeepAliveInBackground(from: defaults))
+
+        defaults.set(true, forKey: SettingsStore.keepAliveInBackgroundKey)
+        XCTAssertTrue(SettingsStore.loadKeepAliveInBackground(from: defaults))
+    }
+
     /// 能力旗標由 runtime 在選定 backend 之後寫入一次；預設樂觀為 true，
     /// 因為 macOS deployment target 是 26（永遠是 WebPage path）。
     func testAutoPlaySupportIsAdoptedFromTheBackend() {

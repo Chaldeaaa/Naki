@@ -43,6 +43,9 @@ enum MajsoulServer: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    nonisolated var displayNameKey: LocalizedStringKey { LocalizedStringKey(displayName) }
+
+    /// 繁中 key；SwiftUI 用 `regionNameKey`，拼進 String 用 `localizedRegionName`。
     nonisolated var regionName: String {
         switch self {
         case .cn:   return "國服"
@@ -50,6 +53,9 @@ enum MajsoulServer: String, CaseIterable, Identifiable, Sendable {
         case .intl: return "國際服"
         }
     }
+
+    nonisolated var regionNameKey: LocalizedStringKey { LocalizedStringKey(regionName) }
+    nonisolated var localizedRegionName: String { L10n.text(.init(regionName)) }
 
     nonisolated var urlString: String {
         switch self {
@@ -69,6 +75,36 @@ enum MajsoulServer: String, CaseIterable, Identifiable, Sendable {
 @MainActor
 final class SettingsStore {
 
+    /// App 內語言的持久化 key。
+    nonisolated static let appLanguageKey = "naki.appLanguage"
+
+    nonisolated static func loadAppLanguage(from defaults: UserDefaults = .standard) -> AppLanguage {
+        defaults.string(forKey: appLanguageKey).flatMap(AppLanguage.init(rawValue:)) ?? .system
+    }
+
+    nonisolated static func saveAppLanguage(_ language: AppLanguage, to defaults: UserDefaults = .standard) {
+        defaults.set(language.rawValue, forKey: appLanguageKey)
+    }
+
+    /// 使用者選的語言；`.system` 跟隨系統。`.appLocale()` 與 `L10n` 都從這裡（或同一個 key）取 locale。
+    var appLanguage: AppLanguage = SettingsStore.loadAppLanguage()
+    {
+        didSet {
+            guard appLanguage != oldValue else { return }
+            Self.saveAppLanguage(appLanguage)
+        }
+    }
+
+    /// 覆寫 SwiftUI 的 locale；`nil` 表示不覆寫（沿用系統）。
+    /// iOS 沒有 App 內語言選單（走「設定 → Naki → 語言」），一律不覆寫。
+    var locale: Locale? {
+        #if os(macOS)
+        appLanguage.locale
+        #else
+        nil
+        #endif
+    }
+
     /// 隱藏玩家名稱的持久化 key —— **唯一定義點**。
     ///
     /// UI 的 Toggle 與 `WebSession` 都讀這個 static，不要在別處再寫一次字面值。
@@ -86,6 +122,53 @@ final class SettingsStore {
             guard hidePlayerNames != oldValue else { return }
             UserDefaults.standard.set(hidePlayerNames, forKey: Self.hidePlayerNamesKey)
         }
+    }
+
+    /// 背景保活的持久化 key。
+    nonisolated static let keepAliveInBackgroundKey = "naki.keepAliveInBackground"
+
+    /// 預設開：未設定過的 key 視為 true（`UserDefaults.bool` 會回 false，所以不能直接用）。
+    nonisolated static func loadKeepAliveInBackground(
+        from defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: keepAliveInBackgroundKey) as? Bool ?? true
+    }
+
+    /// 視窗在背景時讓遊戲主迴圈以低頻率繼續跑，否則 WebKit 停掉 rAF、Unity 不送心跳而斷線
+    /// （實作見 `naki-core.js` 的 `__nakiKeepAlive`）。寫入即持久化。
+    var keepAliveInBackground: Bool = SettingsStore.loadKeepAliveInBackground() {
+        didSet {
+            guard keepAliveInBackground != oldValue else { return }
+            UserDefaults.standard.set(keepAliveInBackground, forKey: Self.keepAliveInBackgroundKey)
+        }
+    }
+
+    // MARK: - 更新提醒
+
+    nonisolated static let autoCheckUpdateKey = "naki.autoCheckUpdate"
+    nonisolated static let lastUpdateCheckKey = "naki.lastUpdateCheck"
+    nonisolated static let skippedUpdateVersionKey = "naki.skippedUpdateVersion"
+
+    /// 預設開：未設定過的 key 視為 true。
+    nonisolated static func loadAutoCheckUpdate(from defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: autoCheckUpdateKey) as? Bool ?? true
+    }
+
+    /// 啟動時自動檢查有沒有新版（只提示，不下載）。
+    var autoCheckUpdate: Bool = SettingsStore.loadAutoCheckUpdate() {
+        didSet {
+            guard autoCheckUpdate != oldValue else { return }
+            UserDefaults.standard.set(autoCheckUpdate, forKey: Self.autoCheckUpdateKey)
+        }
+    }
+
+    /// 上次成功取得回應的時間（離線失敗不算，才不會吃掉 24 小時視窗）。
+    var lastUpdateCheck: Date? = UserDefaults.standard.object(forKey: SettingsStore.lastUpdateCheckKey) as? Date {
+        didSet { UserDefaults.standard.set(lastUpdateCheck, forKey: Self.lastUpdateCheckKey) }
+    }
+
+    /// 使用者按「略過此版本」的版號；自動檢查遇到同一版不再提示。
+    var skippedUpdateVersion: String? = UserDefaults.standard.string(forKey: SettingsStore.skippedUpdateVersionKey) {
+        didSet { UserDefaults.standard.set(skippedUpdateVersion, forKey: Self.skippedUpdateVersionKey) }
     }
 
     // MARK: - 已啟用的插件

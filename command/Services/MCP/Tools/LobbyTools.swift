@@ -173,7 +173,7 @@ struct CancelMatchTool: MCPTool {
         }
 
         let result = await nakiContext.cancelMatch(
-            matchMode: UInt32(max(0, matchMode)),
+            matchMode: try MCPArguments.uint32(matchMode, "match_mode"),
             awaitResponseMs: arguments["awaitResponseMs"] as? Int ?? 1500)
         context.log("⏹️ lobby_cancel_match match_mode=\(matchMode)")
         return LiqiToolResult.dictionary(result.outcome, spec: result.spec,
@@ -350,7 +350,7 @@ struct AccountInfoTool: MCPTool {
             ]
         }
 
-        let spec = LiqiRequestBuilder.fetchAccountInfo(accountId: UInt32(accountId))
+        let spec = LiqiRequestBuilder.fetchAccountInfo(accountId: try MCPArguments.uint32(accountId, "account_id"))
         let outcome = await nakiContext.sendLiqi(spec,
                                                  awaitResponseMs: arguments["awaitResponseMs"] as? Int ?? 1500)
         return LiqiToolResult.dictionary(outcome, spec: spec,
@@ -421,7 +421,7 @@ struct HeartbeatTool: MCPTool {
         guard let nakiContext = context as? NakiMCPContext else {
             throw MCPToolError.notAvailable("Naki context")
         }
-        let counter = UInt32(max(0, arguments["no_operation_counter"] as? Int ?? 0))
+        let counter = try MCPArguments.uint32(arguments, "no_operation_counter")
         let spec = LiqiRequestBuilder.heatbeat(noOperationCounter: counter)
         let outcome = await nakiContext.sendLiqi(spec,
                                                  awaitResponseMs: arguments["awaitResponseMs"] as? Int ?? 1500)

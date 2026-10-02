@@ -69,6 +69,7 @@
 				"Resources/JavaScript/naki-core.js",
 				"Resources/JavaScript/naki-plugins.js",
 				"Resources/JavaScript/naki-websocket.js",
+				Resources/Localizable.xcstrings,
 				Services/AppVersion.swift,
 				Services/Bot/ActionDelayModel.swift,
 				Services/Bot/AkagiApiClient.swift,
@@ -112,6 +113,7 @@
 				Services/Bridge/WebSocketInterceptor.swift,
 				Services/Debug/DebugServer.swift,
 				Services/JSONSanitizer.swift,
+				Services/L10n.swift,
 				Services/LogManager.swift,
 				Services/MCP/LiqiToolResult.swift,
 				Services/MCP/MCPContext.swift,
@@ -130,6 +132,7 @@
 				Services/MCP/Tools/UITools.swift,
 				Services/Plugins/PluginImportSource.swift,
 				Services/Plugins/PluginRegistry.swift,
+				Services/UpdateChecker.swift,
 				Services/Web/GameHighlightScript.swift,
 				Services/Web/WebSession.swift,
 				Services/Web/WebSessionBackends.swift,
@@ -155,6 +158,7 @@
 				"Resources/JavaScript/naki-core.js",
 				"Resources/JavaScript/naki-plugins.js",
 				"Resources/JavaScript/naki-websocket.js",
+				Resources/Localizable.xcstrings,
 				Services/AppVersion.swift,
 				Services/Bot/ActionDelayModel.swift,
 				Services/Bot/AkagiApiClient.swift,
@@ -198,6 +202,7 @@
 				Services/Bridge/WebSocketInterceptor.swift,
 				Services/Debug/DebugServer.swift,
 				Services/JSONSanitizer.swift,
+				Services/L10n.swift,
 				Services/LogManager.swift,
 				Services/MCP/LiqiToolResult.swift,
 				Services/MCP/MCPContext.swift,
@@ -216,6 +221,7 @@
 				Services/MCP/Tools/UITools.swift,
 				Services/Plugins/PluginImportSource.swift,
 				Services/Plugins/PluginRegistry.swift,
+				Services/UpdateChecker.swift,
 				Services/Web/GameHighlightScript.swift,
 				Services/Web/WebSession.swift,
 				Services/Web/WebSessionBackends.swift,
@@ -247,6 +253,7 @@
 				"Resources/JavaScript/naki-core.js",
 				"Resources/JavaScript/naki-plugins.js",
 				"Resources/JavaScript/naki-websocket.js",
+				Resources/Localizable.xcstrings,
 			);
 		};
 /* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
@@ -562,10 +569,14 @@
 				};
 			};
 			buildConfigurationList = EC3076592EDAFD2300216E0C /* Build configuration list for PBXProject "Naki" */;
-			developmentRegion = en;
+			developmentRegion = "zh-Hant";
 			hasScannedForEncodings = 0;
 			knownRegions = (
+				"zh-Hant",
+				"zh-Hans",
 				en,
+				ja,
+				ko,
 				Base,
 			);
 			mainGroup = EC3076552EDAFD2300216E0C;
@@ -846,7 +857,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.39c154f25912233a.akagi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -878,7 +889,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.39c154f25912233a.akagi;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -911,7 +922,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.39c154f25912233am.Naki-M";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -945,7 +956,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.39c154f25912233am.Naki-M";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -969,7 +980,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.39c154f25912233am.Naki-MTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -992,7 +1003,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.39c154f25912233am.Naki-MTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1015,7 +1026,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.39c154f25912233am.Naki-MUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1037,7 +1048,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "org.39c154f25912233am.Naki-MUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1061,7 +1072,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.39c154f25912233a.akagiTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -1080,7 +1091,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.39c154f25912233a.akagiTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -1098,7 +1109,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.39c154f25912233a.akagiUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -1116,7 +1127,7 @@
 				DEVELOPMENT_TEAM = YRJZ6WG9VC;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
-				MARKETING_VERSION = 2.11.0;
+				MARKETING_VERSION = 2.14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.39c154f25912233a.akagiUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -1200,7 +1211,7 @@
 			repositoryURL = "https://github.com/Sunalamye/MortalSwift";
 			requirement = {
 				kind = upToNextMinorVersion;
-				minimumVersion = 0.5.2;
+				minimumVersion = 0.5.3;
 			};
 		};
 		ECAADCF52EE57B2B0056F965 /* XCRemoteSwiftPackageReference "MCPKit" */ = {

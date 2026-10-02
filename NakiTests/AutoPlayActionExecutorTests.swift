@@ -484,4 +484,40 @@ final class AutoPlayActionExecutorTests: XCTestCase {
         XCTAssertFalse(SelfActionEchoTracker.isEcho(type: "tsumo", actor: 2, seat: 2),
                        "摸牌是發牌不是回應，算進去會把「剛好摸到牌」誤判成送出成功")
     }
+
+    // MARK: - 立直宣言牌對照伺服器 combination
+
+    @MainActor
+    private func riichiHex(combination: [String]) async -> String {
+        let store = LiqiOperationStore()
+        var captured: [String] = []
+        let sender = recordingSender { captured.append($0) }
+        let snapshot = store.record(seat: 0,
+                                    operations: [LiqiOperation(type: .discard),
+                                                 LiqiOperation(type: .riichi, combination: combination)],
+                                    source: "test")
+        await AutoPlayActionExecutor.execute(
+            action: .riichi, tile: "riichi", snapshot: snapshot,
+            recommendations: [Recommendation(tile: "9m", probability: 0.9, actionType: .discard),
+                              Recommendation(tile: "3s", probability: 0.5, actionType: .discard)],
+            sender: sender, store: store)
+        return hex(captured.first)
+    }
+
+    /// combination 可解析：只在伺服器可宣言的牌裡挑機率最高的（9m 不在其中，選 3s）
+    @MainActor
+    func testRiichiPicksHighestProbabilityWithinCombination() async {
+        let bytes = await riichiHex(combination: ["3s", "1p"])
+        XCTAssertTrue(bytes.hasSuffix("08071a023373"), "應宣言 3s，實際 bytes=\(bytes)")
+    }
+
+    /// combination 為空、解析不出來、或推薦都不在其中：維持取最高機率的行為
+    @MainActor
+    func testRiichiKeepsTopDiscardWhenCombinationUnusable() async {
+        for combination in [[], ["??"], ["1p"]] {
+            let bytes = await riichiHex(combination: combination)
+            XCTAssertTrue(bytes.hasSuffix("08071a02396d"),
+                          "combination=\(combination) 應退回 9m，實際 bytes=\(bytes)")
+        }
+    }
 }

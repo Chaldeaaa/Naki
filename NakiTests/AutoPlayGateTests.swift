@@ -29,7 +29,7 @@ final class AutoPlayGateTests: XCTestCase {
             seat: 0,
             operations: types.map { LiqiOperation(rawType: $0, combination: []) },
             timeAdd: 0,
-            timeFixed: 300,
+            timeFixed: 300_000,
             contextTile: nil,
             source: "test",
             capturedAt: capturedAt)
@@ -51,7 +51,8 @@ final class AutoPlayGateTests: XCTestCase {
                        snapshot: LiqiOperationSnapshot?,
                        recs: [Recommendation] = [],
                        now: Date = Date(),
-                       grace: TimeInterval = 2.0) -> AutoPlayGate.Input {
+                       grace: TimeInterval = 2.0,
+                       recSeq: UInt64? = nil) -> AutoPlayGate.Input {
         .init(isAutoMode: auto,
               isSanma: sanma,
               cloudDecision: cloud,
@@ -59,7 +60,8 @@ final class AutoPlayGateTests: XCTestCase {
               snapshot: snapshot,
               recommendations: recs,
               now: now,
-              callPassGrace: grace)
+              callPassGrace: grace,
+              recommendationsOplistSequence: recSeq)
     }
 
     // MARK: - 基本閘門
@@ -215,12 +217,21 @@ final class AutoPlayGateTests: XCTestCase {
                        .skip(.notAutoMode))
     }
 
-    /// 連「伺服器提供和牌」這條最高優先的路也不放行——fail-closed 的意思是全部關掉
-    func testSanmaBlocksForceHora() {
+    /// 和牌是伺服器權威、不需要模型：三麻（非雲端決策）也照樣走 forceHora，否則就是漏和
+    func testSanmaStillForceHora() {
         let now = Date()
         let s = snapshot(types: [9], capturedAt: now.addingTimeInterval(-30))
         let d = AutoPlayGate.evaluate(input(sanma: true, snapshot: s, recs: [], now: now))
-        XCTAssertEqual(d, .skip(.sanmaUnsupported))
+        XCTAssertEqual(d, .forceHora)
+    }
+
+    /// 和牌例外只鬆開三麻檢查：非自動模式與已有動作執行中仍然最先擋
+    func testSanmaForceHoraStillRespectsModeAndInFlight() {
+        let s = snapshot(types: [8])
+        XCTAssertEqual(AutoPlayGate.evaluate(input(auto: false, sanma: true, snapshot: s)),
+                       .skip(.notAutoMode))
+        XCTAssertEqual(AutoPlayGate.evaluate(input(sanma: true, inFlight: true, snapshot: s)),
+                       .skip(.sanmaUnsupported))
     }
 
     /// 三麻也不會自動送「過」——那同樣是送出遊戲動作
@@ -256,5 +267,38 @@ final class AutoPlayGateTests: XCTestCase {
                 XCTAssertFalse(reason.rawValue.isEmpty)
             }
         }
+    }
+
+    // MARK: - 過期推薦擋住新副露視窗（C4）
+
+    /// 引擎對新視窗回 nil 時舊推薦還留著：純副露機會過了寬限期要送過，不能永遠被 stale guard 擋
+    func testStaleRecommendationOnPureCallOpportunitySendsPassAfterGrace() {
+        let now = Date()
+        let s = snapshot(types: [3], capturedAt: now.addingTimeInterval(-30), sequence: 5)
+        let d = AutoPlayGate.evaluate(input(snapshot: s, recs: [rec(.pon)], now: now, recSeq: 4))
+        XCTAssertEqual(d, .sendPass)
+    }
+
+    /// 寬限期內仍要等新推論，不能因為舊推薦過期就搶先送過
+    func testStaleRecommendationWaitsWithinGrace() {
+        let now = Date()
+        let s = snapshot(types: [3], capturedAt: now, sequence: 5)
+        let d = AutoPlayGate.evaluate(input(snapshot: s, recs: [rec(.pon)], now: now, recSeq: 4))
+        XCTAssertEqual(d, .skip(.awaitingInference))
+    }
+
+    /// 有和牌的批次不視同無推薦（維持走 resolver），provenance 未知或對上也不受影響
+    func testStaleRecommendationExceptionsKeepOldBehaviour() {
+        let now = Date()
+        let old = now.addingTimeInterval(-30)
+        let withRon = snapshot(types: [3, 9], capturedAt: old, sequence: 5)
+        XCTAssertEqual(AutoPlayGate.evaluate(
+            input(snapshot: withRon, recs: [rec(.pon)], now: now, recSeq: 4)), .proceed)
+
+        let call = snapshot(types: [3], capturedAt: old, sequence: 5)
+        XCTAssertEqual(AutoPlayGate.evaluate(
+            input(snapshot: call, recs: [rec(.pon)], now: now, recSeq: nil)), .proceed)
+        XCTAssertEqual(AutoPlayGate.evaluate(
+            input(snapshot: call, recs: [rec(.pon)], now: now, recSeq: 5)), .proceed)
     }
 }

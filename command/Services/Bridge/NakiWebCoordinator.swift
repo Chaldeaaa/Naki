@@ -48,6 +48,9 @@ final class NakiWebCoordinator {
 
     private let store: GameStore
 
+    /// 上一個事件處理失敗的訊息（連續同一個錯誤只記一次 log）
+    private var lastProcessError: String?
+
     /// 高亮同步與自動打牌引擎的喚醒（由 `NakiRuntime` 注入）
     weak var observer: (any BotResponseObserving)?
 
@@ -92,7 +95,7 @@ final class NakiWebCoordinator {
 
             Task { @MainActor in
                 self.store.isConnected = connected
-                self.store.statusMessage = connected ? "已連線到雀魂服务器" : "已斷開連線"
+                self.store.statusMessage = L10n.text(connected ? "已連線到雀魂伺服器" : "已斷開連線")
 
                 if connected {
                     self.websocketHandler.reset()
@@ -119,7 +122,7 @@ final class NakiWebCoordinator {
     func createBot(playerId: Int, is3P: Bool) throws {
         try bot.createBot(playerId: UInt8(playerId), is3P: is3P)
         store.botStatus = bot.botState
-        store.statusMessage = "Bot 已建立 (Player \(playerId))"
+        store.statusMessage = L10n.text("Bot 已建立 (Player \(playerId))")
     }
 
     /// 刪除 Bot 並清掉屬於這一局的資料。
@@ -138,7 +141,19 @@ final class NakiWebCoordinator {
         // event 帶著它那批 oplist 的 sequence（MajsoulBridge 在 parse 時標的）。
         // react 內部會在推薦真的刷新時把它綁到 controller.lastRecommendationsOplistSequence，
         // GameStore.apply 再從 controller 讀——所以這裡不需要自己傳 sequence。
-        let response = try await bot.react(event: event)
+        let response: [String: Any]?
+        do {
+            response = try await bot.react(event: event)
+        } catch {
+            // controller 已清掉推薦；照樣寫進 store，畫面才不會停在上一個成功事件
+            // （模型檔缺失時每個事件都會走到這裡）
+            store.apply(controller: bot, showRecommendation: store.autoPlayMode.showRecommendation)
+            let message = L10n.text("Bot：\(error.localizedDescription)")
+            store.statusMessage = message
+            store.botFailure = message
+            observer?.botDidRespond()
+            throw error
+        }
 
         // 一次寫完整份快照（`GameStore.apply` 是牌局資料唯一的寫入點）。
         // 側欄的顯示閘門在 `RecommendationView`（讀 `autoPlayMode.showRecommendation`）：
@@ -146,6 +161,7 @@ final class NakiWebCoordinator {
         // `highlightedTile`（現在標了哪一張）在 `.off` 時必須是 nil。
         store.apply(controller: bot,
                     showRecommendation: store.autoPlayMode.showRecommendation)
+        store.botFailure = nil
 
         // 高亮同步 + 通知自動打牌引擎「有新推薦了，不必等下一拍輪詢」。
         observer?.botDidRespond()
@@ -198,7 +214,7 @@ final class NakiWebCoordinator {
             eventStream.emit(event)
             eventStream.endGame()
             deleteBot()   // 手牌／推薦／botStatus 一併清空
-            store.statusMessage = "遊戲結束"
+            store.statusMessage = L10n.text("遊戲結束")
 
         case "end_kyoku":
             // 局間結算：伺服器停在結算窗口等 confirmNewRound。通知引擎（受閘門控制）。
@@ -229,8 +245,14 @@ final class NakiWebCoordinator {
                 } else {
                     bridgeLog("[消費者] \(eventType) → 回應: 無")
                 }
+                self.lastProcessError = nil
             } catch {
-                bridgeLog("[消費者] 處理 \(eventType) 時發生錯誤: \(error)")
+                // 同一個錯誤（例如模型缺失）每個事件都會重來，只記第一次
+                let message = "\(error)"
+                if message != self.lastProcessError {
+                    bridgeLog("[消費者] 處理 \(eventType) 時發生錯誤: \(error)")
+                    self.lastProcessError = message
+                }
             }
         }
     }
@@ -254,9 +276,10 @@ final class NakiWebCoordinator {
         do {
             try createBot(playerId: playerId, is3P: is3P)
             // ☁️ 重放歷史事件期間抑制雲端呼叫：歷史決策不重問伺服器
+            // （只涵蓋這條 history 重放；syncGame 重放走 live 路徑，由 CloudBot 依授權序號擋）
             // （否則重連要付 N 決策 × 2s 逾時預算＋額度）
             bot.prepareForResyncReplay(eventCount: eventStream.eventCount)
-            store.statusMessage = "Bot 已重新同步 (Player \(playerId))"
+            store.statusMessage = L10n.text("Bot 已重新同步 (Player \(playerId))")
             startEventConsumer()
             bridgeLog("[協調器] Bot 重新同步成功")
         } catch {

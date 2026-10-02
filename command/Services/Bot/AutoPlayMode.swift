@@ -10,7 +10,7 @@
 //  送出延遲不在這裡：由 `ActionDelayModel` 依動作類型隨機決定，模式本身不帶延遲設定。
 //
 
-import Foundation
+import SwiftUI
 
 // MARK: - Auto Play Mode
 
@@ -50,7 +50,21 @@ enum AutoPlayMode: String, CaseIterable {
         return self == .fullAuto
     }
 
-    /// Picker 上的短標籤（macOS toolbar 與 iOS toolbar 共用同一份，避免兩邊各寫一串字面值）
+    /// UI 顯示用的全名。`rawValue` 是被持久化的繁中字串，不能拿來顯示（改了會讓舊設定讀不回來）。
+    var displayName: LocalizedStringKey {
+        switch self {
+        case .off: return "關閉"
+        case .recommend: return "推薦"
+        case .auto: return "自動"
+        case .fullAuto: return "全自動"
+        }
+    }
+
+    /// 拼進 String（狀態列）用的全名；SwiftUI 用 `displayName`。`displayName` 的 key 就是 rawValue。
+    var localizedName: String { L10n.text(.init(rawValue)) }
+
+    /// Picker 上的短標籤（macOS toolbar 與 iOS toolbar 共用同一份，避免兩邊各寫一串字面值）。
+    /// 繁中 key；SwiftUI 用 `pickerLabelKey`。
     var pickerLabel: String {
         switch self {
         case .off: return "關"
@@ -59,6 +73,8 @@ enum AutoPlayMode: String, CaseIterable {
         case .fullAuto: return "全自動"
         }
     }
+
+    var pickerLabelKey: LocalizedStringKey { LocalizedStringKey(pickerLabel) }
 }
 
 // MARK: - 路徑可用性
@@ -80,6 +96,9 @@ enum AutoPlayAvailability {
     static let autoUnavailableReason =
         "此裝置走 iOS 17–25 的舊版 WebView 路徑，該路徑的自動送出缺少輪詢閘門與重試保護，"
         + "也沒有任何實機對局驗證，因此只提供推薦顯示；動作請自己下。"
+
+    /// 上面那句是繁中 key（log 與測試用）；畫面用這個。
+    static var autoUnavailableReasonKey: LocalizedStringKey { LocalizedStringKey(autoUnavailableReason) }
 
     /// 這條路徑可以選的模式（順序即 picker 上的順序）
     static func modes(autoPlaySupported: Bool) -> [AutoPlayMode] {
@@ -118,10 +137,10 @@ enum AutoPlayAvailability {
 /// `AutoPlayMode` 的單一持久化來源。
 ///
 /// 全 App 只有 `naki.autoPlayMode` 一個 key。這個設定曾經散在兩個 key，
-/// 兩邊各存各的，UI picker 顯示的模式與實際採用的模式因此可以不一致；
+/// 兩邊各存各的，picker 顯示的模式與實際採用的模式因此可以不一致；
 /// `legacyKey` 只剩一次性遷移的用途，遷移後刪除，不要再新增第二個讀寫點。
 nonisolated enum AutoPlayModeStore {
-    /// 目前唯一的 key（`NakiRuntime` 與 `ContentView` 的 `@AppStorage` 共用）
+    /// 目前唯一的 key。UI 只讀 runtime 生效的模式，寫入只有 `setAutoPlayMode` 一個入口
     static let key = "naki.autoPlayMode"
 
     /// 被合併掉的舊 key（ContentView 舊版 `@AppStorage("AutoPlayMode")`）

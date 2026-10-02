@@ -64,8 +64,8 @@ enum NakiGameAction {
                      arguments: [String: Any],
                      snapshot: LiqiOperationSnapshot?) throws -> LiqiRequestSpec {
         let name = action.lowercased()
-        let timeuse = UInt32(max(0, arguments["timeuse"] as? Int ?? 0))
-        let index = UInt32(max(0, arguments["index"] as? Int ?? 0))
+        let timeuse = try MCPArguments.uint32(arguments, "timeuse")
+        let index = try MCPArguments.uint32(arguments, "index")
 
         func requiredTile() throws -> String {
             guard let raw = arguments["tile"] as? String else {
@@ -107,12 +107,13 @@ enum NakiGameAction {
             return LiqiRequestBuilder.ron(timeuse: timeuse)
 
         case "hora":
-            // 由 oplist 決定自摸還是榮和。⚠️ 現行 legacy fallback 在沒有 snapshot 時取自摸；
-            // 這不是 server-authoritative，呼叫端必須先查 game_ops，後續應改成 fail closed。
-            if (snapshot?.horaOperation ?? .tsumo) == .ron {
-                return LiqiRequestBuilder.ron(timeuse: timeuse)
+            // 由伺服器授權的 oplist 決定自摸還是榮和；沒有快照或沒有和牌授權就不送
+            guard let hora = snapshot?.horaOperation else {
+                throw MCPToolError.notAvailable("hora 授權（game_ops 沒有自摸／榮和機會）")
             }
-            return LiqiRequestBuilder.tsumo(timeuse: timeuse)
+            return hora == .ron
+                ? LiqiRequestBuilder.ron(timeuse: timeuse)
+                : LiqiRequestBuilder.tsumo(timeuse: timeuse)
 
         case "kyushu":
             return LiqiRequestBuilder.kyushu(timeuse: timeuse)
@@ -268,8 +269,8 @@ struct GameActionTool: MCPTool {
     static let description = """
         執行遊戲動作，送出對應的 Liqi REQUEST。\
         action: discard / riichi（需 tile）、chi / pon / kan（可帶 index）、\
-        tsumo / ron / hora / kyushu / babei / pass。hora 必須先有 game_ops snapshot；\
-        現行無 snapshot fallback 會猜 tsumo，不具 server-authoritative 保證。\
+        tsumo / ron / hora / kyushu / babei / pass。hora 只在 game_ops 有自摸／榮和授權時送出，\
+        沒有快照或授權就回錯誤（fail closed）。\
         kan 未指定 kanType 時依 game_ops 推導（暗槓→加槓→大明槓）；\
         pass 依 game_ops 判斷送 inputChiPengGang 或 inputOperation。
         """
@@ -380,7 +381,7 @@ struct GameActionVerifyTool: MCPTool {
             waited += 50
         }
 
-        let serverAccepted = outcome.response.map { !$0.hasError }
+        let serverAccepted = outcome.response.map(LiqiToolResult.serverAccepted)
         result["verified"] = advanced || serverAccepted == true
         result["opsAdvanced"] = advanced
         result["beforeSequence"] = before.map { Int($0.sequence) } ?? NSNull()

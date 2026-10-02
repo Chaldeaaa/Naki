@@ -59,13 +59,14 @@ struct KyokuStreamAccumulator {
 
     /// 單一事件的 API 塑形：
     /// - 剝掉 Naki 內部欄位（oplist provenance、`start_game` 的 `id`/`is3P`）
-    /// - `start_game` 只留 `type` + `names`（與 Akagi `to_api_event` 一致）
+    /// - `start_game` 只留 `type` + `names`（與 Akagi `to_api_event` 一致），暱稱換成 `Player0…3` 佔位
     /// - `reach` 防禦性只留 `type` + `actor`（伺服器要裸 reach）
     /// - 三麻把 `names`/`scores`/`tehais` 補到長度 4（幽靈第四家：空名、0 分、13 張 "?"）
     static func apiEvent(_ event: [String: Any], is3P: Bool) -> [String: Any] {
         switch event["type"] as? String {
         case "start_game":
-            var names = event["names"] as? [String] ?? []
+            // 真實暱稱不上傳：伺服器只用座位推論，names 只需長度正確
+            var names = (event["names"] as? [String] ?? []).indices.map { "Player\($0)" }
             if is3P {
                 while names.count < 4 { names.append("") }
             }

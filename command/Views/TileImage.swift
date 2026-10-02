@@ -106,7 +106,7 @@ struct TileImage: View {
                     .strokeBorder(Color.secondary.opacity(0.45), lineWidth: 1)
             )
             .overlay(
-                Text(tile.displayName)
+                Text(tile.displayNameKey)
                     .font(.system(size: max(7, width * 0.34), weight: .semibold))
                     .foregroundStyle(.black)
                     .minimumScaleFactor(0.5)

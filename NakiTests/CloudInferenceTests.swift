@@ -124,11 +124,12 @@ final class KyokuStreamAccumulatorTests: XCTestCase {
         XCTAssertFalse(accumulator.hasUploadableWindow)
     }
 
-    func test_apiEvent_startGame_keepsOnlyTypeAndNames() {
+    func test_apiEvent_startGame_keepsOnlyTypeAndAnonymizedNames() {
         let shaped = KyokuStreamAccumulator.apiEvent(startGame(), is3P: false)
         XCTAssertEqual(shaped.count, 2)
         XCTAssertEqual(shaped["type"] as? String, "start_game")
-        XCTAssertEqual(shaped["names"] as? [String], ["A", "B", "C", "D"])
+        XCTAssertEqual(shaped["names"] as? [String], ["Player0", "Player1", "Player2", "Player3"],
+                       "真實暱稱不得上傳雲端")
         XCTAssertNil(shaped["id"], "Naki 內部的座位欄位不上傳")
         XCTAssertNil(shaped["is3P"], "Naki 內部旗標不上傳")
     }
@@ -163,8 +164,7 @@ final class KyokuStreamAccumulatorTests: XCTestCase {
         let game: [String: Any] = ["type": "start_game", "id": 0, "is3P": true,
                                    "names": ["A", "B", "C"]]
         let shapedGame = KyokuStreamAccumulator.apiEvent(game, is3P: true)
-        XCTAssertEqual((shapedGame["names"] as? [String])?.count, 4)
-        XCTAssertEqual((shapedGame["names"] as? [String])?.last, "")
+        XCTAssertEqual(shapedGame["names"] as? [String], ["Player0", "Player1", "Player2", ""])
 
         let kyoku: [String: Any] = [
             "type": "start_kyoku", "bakaze": "E", "kyoku": 1, "honba": 0,

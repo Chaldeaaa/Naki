@@ -606,9 +606,10 @@ class WebSocketMessageHandler: NSObject, WKScriptMessageHandler {
         // 否則第三方 socket 關閉會在雀魂線全斷之後再多報一次 disconnected。
         guard data["isMajsoul"] as? Bool ?? false else { return }
 
-        connectedSockets.remove(socketId)
+        // 握手失敗的 socket 從沒進過集合：集合本來就空，不是「由非空轉空」，不報
+        let wasMember = connectedSockets.remove(socketId) != nil
 
-        if connectedSockets.isEmpty {
+        if wasMember, connectedSockets.isEmpty {
             onWebSocketStatusChanged?(false)
         }
     }

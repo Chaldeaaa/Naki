@@ -12,8 +12,9 @@
 //  ensure_ascii），Swift 序列化器逐位元組復刻它是白費工又易錯——直接用
 //  `Process` 跑同一段 python 片段，同源保證同格式。
 //
-//  ⚠️ 本機驗證測試：依賴 `~/Library/Logs/Naki/<session>/games/` 的實錄與
-//  repo `note/` 的 baseline，任一缺席就 XCTSkip（換機器不會紅）。
+//  fixture（`NakiTests/Fixtures/replay-*.mjai.jsonl`）與 baseline 都在版控裡，
+//  任一缺席代表有人刪了它們，所以是 XCTFail 而不是 XCTSkip。
+//  只有指紋片段需要的 python3 不可用時才 XCTSkip。
 //
 
 import XCTest
@@ -23,8 +24,8 @@ import XCTest
 @MainActor
 final class ReplayFingerprintTests: XCTestCase {
 
-    /// 20260803-013133 的錄影已被 log 輪替（保留 8 次啟動——**跑一次測試就是
-    /// 一次啟動**）清掉，baseline 留著但無法重放。
+    /// 20260803-013133 的錄影已被舊版 log 輪替（按啟動次數保留 8 份——**跑一次測試就是
+    /// 一次啟動**）清掉，baseline 留著但無法重放。輪替現在會跳過 `games/` 有錄影的 session。
     ///
     /// 倖存的一局在 `NakiTests/Fixtures/`，**在版控裡**。
     ///

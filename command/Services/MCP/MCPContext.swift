@@ -62,6 +62,28 @@ protocol NakiMCPContext: MCPContext {
     func setAntiIdle(enabled: Bool?, intervalSeconds: TimeInterval?) -> [String: Any]?
 }
 
+// MARK: - 參數轉型
+
+/// 工具參數的無號整數轉型。
+///
+/// `as? Int` 不擋上界（`4294967296` 照樣成功），直接餵 `UInt32(_:)` 會 trap；
+/// 超界統一回參數錯誤。負數維持既有語意，夾成 0。
+enum MCPArguments {
+
+    nonisolated static func uint32(_ value: Int, _ name: String) throws -> UInt32 {
+        guard let result = UInt32(exactly: max(0, value)) else {
+            throw MCPToolError.invalidParameter(name, expected: "0–\(UInt32.max) 的整數")
+        }
+        return result
+    }
+
+    /// 缺省或型別不符用 `default`
+    nonisolated static func uint32(_ arguments: [String: Any], _ name: String,
+                                   default fallback: Int = 0) throws -> UInt32 {
+        try uint32(arguments[name] as? Int ?? fallback, name)
+    }
+}
+
 // MARK: - Default Naki Context Implementation
 
 /// Naki 專用的 MCP 上下文實現。

@@ -37,8 +37,9 @@ final class MCPHandler {
     /// 執行上下文
     let context: DefaultNakiMCPContext
 
-    /// HTTP 那一層（`DebugServer`）。unowned：server 持有 handler，反向不能再持有。
-    private unowned let responder: MCPHTTPResponder
+    /// HTTP 那一層（`DebugServer`）。weak：server 持有 handler，反向不能再持有；
+    /// 工具執行中使用者停掉 server 時 responder 可能已釋放，回應直接丟棄。
+    private weak var responder: MCPHTTPResponder?
 
     // MARK: - Initialization
 
@@ -80,7 +81,7 @@ final class MCPHandler {
 
         case .accepted:
             // JSON-RPC 通知沒有 id，也就沒有可回的 response
-            responder.sendMCPResponse(connection: connection, status: 202, body: "",
+            responder?.sendMCPResponse(connection: connection, status: 202, body: "",
                                        contentType: "application/json")
 
         case .failure(let failure):
@@ -205,13 +206,12 @@ final class MCPHandler {
     /// 發送 MCP JSON 響應
     private func sendJSON(connection: NWConnection, data: [String: Any], status: Int) {
         do {
-            let sanitized = JSONSanitizer.sanitize(data)
-            let jsonData = try JSONSerialization.data(withJSONObject: sanitized, options: [])
+            let jsonData = try JSONSanitizer.data(data)
             let body = String(data: jsonData, encoding: .utf8) ?? "{}"
-            responder.sendMCPResponse(connection: connection, status: status, body: body,
+            responder?.sendMCPResponse(connection: connection, status: status, body: body,
                                        contentType: "application/json")
         } catch {
-            responder.sendMCPResponse(
+            responder?.sendMCPResponse(
                 connection: connection, status: 500,
                 body: "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Internal error\"}}",
                 contentType: "application/json")

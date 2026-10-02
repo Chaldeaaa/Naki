@@ -32,7 +32,7 @@ final class AutoPlayEngineTests: XCTestCase {
         timing.maxAttempts = maxAttempts
         timing.passAttempts = maxAttempts
         timing.passPolicy = .init(maxAttempts: maxAttempts, delay: 0)
-        timing.actionDelay = { _, _ in 0 }
+        timing.actionDelay = { _, _, _ in 0 }
         timing.actionAwaitResponseMs = 0   // 這些測試只驗第 1 層（沒注入 RESPONSE）
         return timing
     }
@@ -71,7 +71,7 @@ final class AutoPlayEngineTests: XCTestCase {
     private func tsumoSnapshot(_ store: LiqiOperationStore) -> LiqiOperationSnapshot {
         store.record(seat: 0,
                      operations: [LiqiOperation(type: .tsumo)],
-                     timeFixed: 300,
+                     timeFixed: 300_000,
                      contextTile: "5p",
                      source: "ActionDealTile")
     }
@@ -85,7 +85,7 @@ final class AutoPlayEngineTests: XCTestCase {
     private func discardSnapshot(_ store: LiqiOperationStore) -> LiqiOperationSnapshot {
         store.record(seat: 0,
                      operations: [LiqiOperation(type: .discard)],
-                     timeFixed: 300,
+                     timeFixed: 300_000,
                      contextTile: "5p",
                      source: "ActionDealTile")
     }
@@ -341,7 +341,7 @@ final class AutoPlayEngineTests: XCTestCase {
         let box = Box()
 
         var t = timing()
-        t.actionDelay = { _, scale in box.scale = scale; return 0 }
+        t.actionDelay = { _, scale, _ in box.scale = scale; return 0 }
 
         let engine = AutoPlayEngine(
             store: store, sender: sender, timing: t,
@@ -376,7 +376,7 @@ final class AutoPlayEngineTests: XCTestCase {
             sends += 1
             return self.ok()
         }
-        tsumoSnapshot(store)
+        discardSnapshot(store)
 
         let engine = makeEngine(store: store, sender: sender,
                                 recommendations: discardRecommendation, isSanma: true)
@@ -486,10 +486,10 @@ final class AutoPlayEngineTests: XCTestCase {
         // 而且已經過了寬限期 → 每一拍都「有機會卻沒送出」。
         store.record(seat: 0,
                      operations: [LiqiOperation(type: .discard)],
-                     timeFixed: 300, contextTile: "5p", source: "test")
+                     timeFixed: 300_000, contextTile: "5p", source: "test")
 
-        let past = Date().addingTimeInterval(-30)   // 讓寬限期早就過了
-        for _ in 0..<5 { _ = await engine.runCycle(now: past) }
+        let afterGrace = Date().addingTimeInterval(timing().callPassGrace + 1)   // 讓寬限期已過（now 往後推）
+        for _ in 0..<5 { _ = await engine.runCycle(now: afterGrace) }
 
         let stalls = reported.compactMap { $0 }
         XCTAssertFalse(stalls.isEmpty, "連續沒送出必須回報停滯")
@@ -544,7 +544,7 @@ final class AutoPlayEngineTests: XCTestCase {
             onStallChanged: { reported.append($0) })
 
         store.record(seat: 0, operations: [LiqiOperation(type: .discard)],
-                     timeFixed: 300, contextTile: "5p", source: "test")
+                     timeFixed: 300_000, contextTile: "5p", source: "test")
 
         let start = Date()
         for _ in 0..<5 { _ = await engine.runCycle(now: start) }
@@ -558,6 +558,243 @@ final class AutoPlayEngineTests: XCTestCase {
 
         XCTAssertNil(reported.last ?? nil,
                      "送出成功之後必須回報「停滯結束」（nil），實際：\(String(describing: reported.last))")
+    }
+
+    // MARK: - P3 自動打牌修補
+
+    /// C7：三麻（非雲端決策）伺服器授權的和牌照送，輪詢與手動兩條路都是
+    func testSanmaLocalDecisionStillSendsHora() async {
+        let store = LiqiOperationStore()
+        let sender = LiqiActionSender()
+        var sends = 0
+        sender.sendHandler = { _ in sends += 1; return self.ok() }
+        tsumoSnapshot(store)
+
+        let polled = await makeEngine(store: store, sender: sender, isSanma: true).runCycle()
+        guard case .sent(let action, _, _) = polled.outcome else {
+            return XCTFail("三麻和牌不得被擋，實際: \(polled.outcome)")
+        }
+        XCTAssertEqual(action, .hora)
+        XCTAssertEqual(sends, 1)
+
+        tsumoSnapshot(store)
+        let manual = await makeEngine(store: store, sender: sender,
+                                      recommendations: discardRecommendation, isSanma: true)
+            .runManualCycle()
+        guard case .sent(let manualAction, _, _) = manual.outcome else {
+            return XCTFail("手動觸發的三麻和牌不得被擋，實際: \(manual.outcome)")
+        }
+        XCTAssertEqual(manualAction, .hora)
+    }
+
+    /// CR#7：手動觸發在推薦為空時，伺服器授權的和牌照送（四麻、三麻都是）；沒有和牌仍不送
+    func testManualTriggerSendsHoraWithoutRecommendation() async {
+        for sanma in [false, true] {
+            let store = LiqiOperationStore()
+            let sender = LiqiActionSender()
+            var sends = 0
+            sender.sendHandler = { _ in sends += 1; return self.ok() }
+            tsumoSnapshot(store)
+
+            let run = await makeEngine(store: store, sender: sender, isSanma: sanma).runManualCycle()
+            guard case .sent(let action, _, _) = run.outcome else {
+                return XCTFail("推薦為空但有和牌，手動觸發要送和牌（sanma=\(sanma)），實際: \(run.outcome)")
+            }
+            XCTAssertEqual(action, .hora)
+            XCTAssertEqual(sends, 1)
+        }
+
+        let store = LiqiOperationStore()
+        let sender = LiqiActionSender()
+        sender.sendHandler = { _ in self.ok() }
+        discardSnapshot(store)
+        let run = await makeEngine(store: store, sender: sender).runManualCycle()
+        XCTAssertEqual(run.outcome, .notSent(reason: "no_recommendation"))
+    }
+
+    /// C6：引擎要把伺服器的時限（毫秒）換成秒傳給延遲計算——單位錯或沒傳都會讓上限失效
+    func testEngineThreadsServerDeadlineInSecondsIntoTheDelaySeam() async {
+        let store = LiqiOperationStore()
+        store.record(seat: 0,
+                     operations: [LiqiOperation(type: .discard)],
+                     timeAdd: 20_000, timeFixed: 5_000,
+                     contextTile: "1m", source: "ActionDealTile")
+        let sender = LiqiActionSender()
+        sender.sendHandler = { _ in self.ok() }
+
+        final class Box { var deadline: TimeInterval = -1 }
+        let box = Box()
+        var t = timing()
+        t.actionDelay = { _, _, deadline in box.deadline = deadline; return 0 }
+
+        let engine = AutoPlayEngine(
+            store: store, sender: sender, timing: t,
+            context: {
+                AutoPlayEngine.Context(mode: .auto, recommendations: self.discardRecommendation,
+                                       seat: 0, isSanma: false, tsumoTile: nil, isReady: true,
+                                       recommendationsOplistSequence: store.pending?.sequence)
+            })
+
+        _ = await engine.runCycle()
+
+        XCTAssertEqual(box.deadline, 25, accuracy: 1e-9, "timeFixed 5000ms + timeAdd 20000ms = 25 秒")
+    }
+
+    /// CR#5：副露寬限期不得超過視窗本身——段位場固定 5 秒，等 8 秒等於每次都逾時
+    func testCallPassGraceShrinksToShortWindows() async {
+        func outcome(timeFixed: UInt32, after seconds: TimeInterval) async -> AutoPlayCycleOutcome {
+            let store = LiqiOperationStore()
+            let sender = LiqiActionSender()
+            sender.sendHandler = { _ in self.ok() }
+            store.record(seat: 0, operations: [LiqiOperation(type: .pon)],
+                         timeFixed: timeFixed, contextTile: "5p", source: "test")
+            let run = await makeEngine(store: store, sender: sender)
+                .runCycle(now: Date().addingTimeInterval(seconds))
+            return run.outcome
+        }
+
+        let shortWindow = await outcome(timeFixed: 5_000, after: 4.5)
+        XCTAssertEqual(shortWindow, .passed(attempts: 1, handled: true),
+                       "5 秒視窗的寬限期是 4 秒，4.5 秒時該送過")
+        let longWindow = await outcome(timeFixed: 300_000, after: 4.5)
+        XCTAssertEqual(longWindow, .skipped(.awaitingInference), "長視窗維持 8 秒寬限")
+        let unknownWindow = await outcome(timeFixed: 0, after: 4.5)
+        XCTAssertEqual(unknownWindow, .skipped(.awaitingInference), "時限未知時用預設寬限")
+    }
+
+    /// C4：新副露視窗、推薦是舊的非空推薦——過了寬限期要送過，不能永遠停在 stale
+    func testStaleRecommendationOnCallWindowEventuallyPasses() async {
+        let store = LiqiOperationStore()
+        let sender = LiqiActionSender()
+        var sends = 0
+        sender.sendHandler = { _ in sends += 1; return self.ok() }
+        store.record(seat: 0, operations: [LiqiOperation(type: .discard)],
+                     timeFixed: 300_000, contextTile: "5p", source: "test")
+        let snapshot = store.record(seat: 0, operations: [LiqiOperation(type: .pon)],
+                                    timeFixed: 300_000, contextTile: "5p", source: "test")
+        let engine = AutoPlayEngine(
+            store: store, sender: sender, timing: timing(),
+            context: {
+                AutoPlayEngine.Context(
+                    mode: .auto,
+                    recommendations: [Recommendation(tile: "1m", probability: 0.9,
+                                                     actionType: .discard)],
+                    seat: 0, isSanma: false, tsumoTile: nil, isReady: true,
+                    recommendationsOplistSequence: snapshot.sequence - 1)
+            })
+
+        let run = await engine.runCycle(now: Date().addingTimeInterval(60))
+        XCTAssertEqual(run.outcome, .passed(attempts: 1, handled: true))
+        XCTAssertEqual(sends, 1)
+    }
+
+    /// C16：延遲期間被取消，不得在 sleep 提早返回後把動作送出去
+    func testCancelDuringDelayDoesNotSend() async {
+        let store = LiqiOperationStore()
+        let sender = LiqiActionSender()
+        var sends = 0
+        sender.sendHandler = { _ in sends += 1; return self.ok() }
+        discardSnapshot(store)
+        var slow = timing()
+        slow.actionDelay = { _, _, _ in 5 }
+        let engine = AutoPlayEngine(
+            store: store, sender: sender, timing: slow,
+            context: {
+                AutoPlayEngine.Context(mode: .auto, recommendations: self.discardRecommendation,
+                                       seat: 0, isSanma: false, tsumoTile: nil, isReady: true,
+                                       recommendationsOplistSequence: store.pending?.sequence)
+            })
+
+        let task = Task { await engine.runCycle() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+        let run = await task.value
+
+        XCTAssertEqual(run.outcome, .notSent(reason: "cancelled"))
+        XCTAssertEqual(sends, 0)
+        XCTAssertNotNil(store.pending, "沒送出就不能消化 oplist")
+    }
+
+    /// C14：和牌重試用盡立刻走停滯通道，不等 4 拍
+    func testHoraRetriesExhaustedReportsStallImmediately() async {
+        let store = LiqiOperationStore()
+        let sender = LiqiActionSender()
+        sender.sendHandler = { _ in LiqiRawSendResult(success: false, detail: "no channel") }
+        tsumoSnapshot(store)
+        var reported: [AutoPlayStall?] = []
+        let engine = AutoPlayEngine(
+            store: store, sender: sender, timing: timing(maxAttempts: 3),
+            context: {
+                AutoPlayEngine.Context(mode: .auto, recommendations: [],
+                                       seat: 0, isSanma: false, tsumoTile: nil, isReady: true,
+                                       recommendationsOplistSequence: nil)
+            },
+            onStallChanged: { reported.append($0) })
+
+        let run = await engine.runCycle()
+
+        XCTAssertEqual(run.outcome, .sendFailed(action: .hora, attempts: 3))
+        let stall = reported.compactMap { $0 }.last
+        XCTAssertEqual(stall?.consecutiveTicks, 1, "第一拍就要出聲")
+        XCTAssertTrue(stall?.reason.contains("手動操作") == true, "訊息要叫人手動操作: \(String(describing: stall))")
+    }
+
+    /// C17：推薦／關閉模式不累計停滯；自動模式顯示實際經過秒數
+    func testStallOnlyInAutoModeAndReportsElapsedSeconds() async {
+        func runCycles(mode: AutoPlayMode) async -> [AutoPlayStall] {
+            let store = LiqiOperationStore()
+            let sender = LiqiActionSender()
+            var reported: [AutoPlayStall?] = []
+            var t = timing(maxAttempts: 1)
+            var capturedAt = Date()
+            // 報出停滯時已是 oplist 到達後 8 秒；秒數要從 oplist 到達起算，不是從第一個計入的拍
+            t.clock = { capturedAt.addingTimeInterval(8) }
+            let engine = AutoPlayEngine(
+                store: store, sender: sender, timing: t,
+                context: {
+                    AutoPlayEngine.Context(mode: mode, recommendations: [],
+                                           seat: 0, isSanma: false, tsumoTile: nil, isReady: true,
+                                           recommendationsOplistSequence: nil)
+                },
+                onStallChanged: { reported.append($0) })
+            store.record(seat: 0, operations: [LiqiOperation(type: .discard)],
+                         timeFixed: 300_000, contextTile: "5p", source: "test")
+            capturedAt = store.pending!.capturedAt
+            for _ in 0..<6 { _ = await engine.runCycle(now: Date().addingTimeInterval(timing().callPassGrace + 1)) }
+            return reported.compactMap { $0 }
+        }
+
+        for mode in [AutoPlayMode.off, .recommend] {
+            let stalls = await runCycles(mode: mode)
+            XCTAssertTrue(stalls.isEmpty, "\(mode.rawValue) 不會自動送，不該報停滯")
+        }
+        let stalls = await runCycles(mode: .auto)
+        XCTAssertEqual(stalls.first?.consecutiveTicks, 4)
+        XCTAssertEqual(stalls.first?.elapsedSeconds, 8, "從 oplist 到達起算，不是從第一個計入的拍")
+    }
+
+    /// C18：「過」送出失敗用盡的紀錄要如實寫失敗
+    func testPassGiveUpIsLoggedAsFailure() async {
+        let store = LiqiOperationStore()
+        let sender = LiqiActionSender()
+        sender.sendHandler = { _ in LiqiRawSendResult(success: false, detail: "no channel") }
+        store.record(seat: 0, operations: [LiqiOperation(type: .pon)],
+                     timeFixed: 300_000, contextTile: "5p", source: "test")
+        let engine = AutoPlayEngine(
+            store: store, sender: sender, timing: timing(maxAttempts: 2),
+            context: {
+                AutoPlayEngine.Context(
+                    mode: .auto,
+                    recommendations: [Recommendation(tile: "none", probability: 0.9, actionType: .none)],
+                    seat: 0, isSanma: false, tsumoTile: nil, isReady: true,
+                    recommendationsOplistSequence: store.pending?.sequence)
+            })
+
+        let run = await engine.runCycle()
+
+        XCTAssertEqual(run.outcome, .sendFailed(action: .none, attempts: 2))
+        XCTAssertFalse(run.log.contains { $0.contains("Pass 已發送") })
+        XCTAssertTrue(run.log.contains { $0.contains("Pass 送出失敗") })
     }
 }
 

@@ -43,6 +43,10 @@ struct LiqiToolSendOutcome {
 /// 把送出結果轉成 MCP 工具的回傳字典
 enum LiqiToolResult {
 
+    nonisolated static func serverAccepted(_ response: LiqiResponseRecord) -> Bool {
+        !response.hasError
+    }
+
     /// - Parameters:
     ///   - outcome: 送出結果
     ///   - spec: 送出的請求（用來附上 method 與 payload hex，方便對拍）
@@ -75,7 +79,7 @@ enum LiqiToolResult {
 
         if let response = outcome.response {
             result["response"] = response.dictionary
-            result["serverAccepted"] = !response.hasError
+            result["serverAccepted"] = serverAccepted(response)
             // 被拒絕時直接把碼寫進 log。以前只記 `✅ 已送出`（那只代表 bytes 出去了），
             // 要知道伺服器其實拒絕了得去翻 MCP 回應再手工解 base64。
             if let desc = response.errorDescription {

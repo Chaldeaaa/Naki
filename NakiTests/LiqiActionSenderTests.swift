@@ -437,4 +437,44 @@ final class LiqiActionSenderTests: XCTestCase {
         XCTAssertEqual(result.detail, "no_open_majsoul_connection")
         XCTAssertEqual(result.method, ".lq.FastTest.inputChiPengGang")
     }
+
+    // MARK: - 憑證不進 log
+
+    /// `lobby_login_beat` 的 contract 曾經隨 payload 原文進 `all.log`／`/logs`
+    @MainActor
+    func testCredentialPayloadIsNotLogged() async {
+        let sender = LiqiActionSender { _ in LiqiRawSendResult(success: true, detail: nil) }
+        var logs: [String] = []
+        sender.logHandler = { logs.append($0) }
+        let spec = LiqiRequestBuilder.loginBeat(contract: "SECRET-CONTRACT")
+
+        _ = await sender.send(spec)
+
+        let joined = logs.joined(separator: "\n")
+        XCTAssertFalse(joined.contains(LiqiEncoder.hexString(spec.payload)))
+        XCTAssertTrue(joined.contains("payload=<redacted \(spec.payload.count) bytes>"), joined)
+    }
+
+    /// 會帶密碼／驗證碼的方法都要遮蔽（雀魂拼字 `verfifyCodeForSecure` 原樣保留）
+    func testCredentialMethodsAreAllRedacted() {
+        for name in ["login", "oauth2Login", "oauth2Auth", "emailLogin", "loginBeat", "modifyPassword",
+                     "signup", "bindAccount", "bindEmail", "bindPhoneNumber", "verfifyCodeForSecure",
+                     "fetchPhoneLoginBind", "createPhoneVerifyLogin"] {
+            XCTAssertTrue(LiqiCredentialMethods.matches(".lq.Lobby.\(name)"), name)
+        }
+    }
+
+    func testOrdinaryMethodsAreNotRedacted() {
+        for name in ["fetchServerTime", "heatbeat", "fetchRoom", "joinRoom", "startUnifiedMatch", "fetchInfo"] {
+            XCTAssertFalse(LiqiCredentialMethods.matches(".lq.Lobby.\(name)"), name)
+        }
+    }
+
+    /// 一般動作照舊記 payload（診斷用）
+    @MainActor
+    func testNonCredentialPayloadIsLogged() {
+        let spec = LiqiRequestBuilder.pon()
+        XCTAssertEqual(LiqiActionSender.loggablePayload(spec),
+                       "payload=\(LiqiEncoder.hexString(spec.payload))")
+    }
 }

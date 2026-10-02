@@ -40,7 +40,8 @@ final class AutoRematchEngineTests: XCTestCase {
         lobbyReady: Bool = true,
         accepts: @escaping (String, String) async -> Bool = { _, _ in true },
         modeBox: (() -> AutoPlayMode)? = nil,
-        log: @escaping (String) -> Void = { _ in }
+        log: @escaping (String) -> Void = { _ in },
+        onFailure: @escaping (String) -> Void = { _ in }
     ) -> AutoRematchEngine {
         AutoRematchEngine(
             context: {
@@ -55,6 +56,7 @@ final class AutoRematchEngineTests: XCTestCase {
             startMatch: accepts,
             lobbyProbe: { lobbyReady },
             log: log,
+            onFailure: onFailure,
             settleDelay: .milliseconds(1),
             probeInterval: .milliseconds(1),
             maxProbes: 3,
@@ -213,6 +215,27 @@ final class AutoRematchEngineTests: XCTestCase {
         XCTAssertEqual(calls, 2)
     }
 
+    /// 失敗結局要讓畫面知道全自動循環停了（log 之外的狀態訊息）
+    @MainActor
+    func testFailureEndingsReportStatusMessage() async {
+        pinAppLanguage()
+        var messages: [String] = []
+        let rejected = makeEngine(accepts: { _, _ in false }, onFailure: { messages.append($0) })
+        _ = await rejected.run()
+        let noSid = makeEngine(sids: [], onFailure: { messages.append($0) })
+        _ = await noSid.run()
+        let lobby = makeEngine(lobbyReady: false, onFailure: { messages.append($0) })
+        _ = await lobby.run()
+
+        XCTAssertEqual(messages.count, 3)
+        XCTAssertTrue(messages.allSatisfy { $0.hasPrefix("全自動續局已停止：") })
+
+        var quiet: [String] = []
+        let ok = makeEngine(onFailure: { quiet.append($0) })
+        _ = await ok.run()
+        XCTAssertTrue(quiet.isEmpty, "成功排入不得回報失敗")
+    }
+
     /// 一直被拒就停手，不無限重試
     @MainActor
     func testGivesUpAfterMaxAttempts() async {
@@ -300,7 +323,7 @@ final class ObservedMatchSidKindTests: XCTestCase {
     @MainActor
     override func setUp() {
         super.setUp()
-        ObservedMatchSids.shared.reset()
+        isolateSharedObservedMatchSids(self)
     }
 
     /// 剛記錄時人數未知；打過一場才確認

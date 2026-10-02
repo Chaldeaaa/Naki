@@ -75,8 +75,17 @@ enum AutoPlayActionExecutor {
         case .riichi:
             // Mortal 把「立直宣言」與「捨牌」拆成兩個動作，但 ReqSelfOperation(type=7)
             // 必須同時帶上捨牌，因此取同一批推薦中機率最高的打牌當宣言牌。
-            // ⚠️ 未驗證：此選法是否與 Mortal 立直後的第二次推論結果一致。
-            guard let discardRec = recommendations.first(where: { $0.actionType == .discard }),
+            // 伺服器的立直 combination（可宣言牌）解析得出來時，只在裡面挑；
+            // 挑不到（沒有推薦落在其中）或解析不出來就維持不限制，非法牌由伺服器拒絕後重試。
+            // 本地 bot 的打牌項已是立直後的第二次推論；這裡的 combination 過濾是安全網。
+            // ⚠️ 未驗證：combination 的實際字串格式（此處假設單張雀魂牌字串，`|` 分隔也吃）。
+            let declarable = declarableRiichiTiles(snapshot)
+            let discards = recommendations.filter { $0.actionType == .discard }
+            let inCombination = discards.first { declarable.contains($0.displayTile) }
+            if !declarable.isEmpty, inCombination == nil {
+                event("⚠️ 立直: 推薦的捨牌都不在伺服器的可宣言牌 \(declarable.sorted()) 內，退回取最高機率捨牌")
+            }
+            guard let discardRec = inCombination ?? discards.first,
                   let majsoulTile = LiqiTile.majsoul(fromMJAI: discardRec.displayTile)
             else {
                 event("❌ 立直: 找不到可宣言的捨牌，未送出，保留 oplist")
@@ -146,6 +155,14 @@ enum AutoPlayActionExecutor {
             store.markHandled(sequence)
         }
         return result
+    }
+
+    /// 立直 operation 的 combination 轉成 MJAI 牌集合；沒有或解析不出來回空集合。
+    private static func declarableRiichiTiles(_ snapshot: LiqiOperationSnapshot?) -> Set<String> {
+        let tiles = (snapshot?.operation(of: .riichi)?.combination ?? [])
+            .flatMap { $0.split(separator: "|").map(String.init) }
+            .compactMap { LiqiTile.mjai(fromMajsoul: $0) }
+        return Set(tiles)
     }
 
     /// 送出並套用三層成功判準。`awaitResponseMs == 0` 時只看第 1 層（sendRaw）。

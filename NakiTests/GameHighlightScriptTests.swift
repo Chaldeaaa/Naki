@@ -40,6 +40,15 @@ final class GameHighlightScriptTests: XCTestCase {
             capturedAt: Date())
     }
 
+    /// NaN／Inf 進 `JSONSerialization` 會丟 ObjC 例外（`try?` 攔不到）而崩潰
+    func testRecommendationsJSONSurvivesNonFiniteProbability() throws {
+        let recs = [Recommendation(tile: "1m", probability: .nan, actionType: .discard),
+                    Recommendation(tile: "2m", probability: .infinity, actionType: .discard)]
+        let json = WebSession.recommendationsJSON(recs)
+        let parsed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]])
+        XCTAssertEqual(parsed.map { $0["probability"] as? Double }, [0, 0])
+    }
+
     // MARK: - `.off` 一律清空
 
     /// 有推薦、有手牌、還有副露機會——`.off` 仍然只能送 clear()

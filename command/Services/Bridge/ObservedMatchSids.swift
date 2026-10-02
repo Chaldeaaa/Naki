@@ -48,7 +48,7 @@ final class ObservedMatchSids {
         let sid: String
         /// 同一次 request 的 `client_version_string`（field 2），可能是空字串
         let clientVersionString: String
-        let seenAt: Date
+        var seenAt: Date
         /// 看到幾次（同一組會累加而不是重複記錄）
         var count: Int
         /// 這個 sid 開出來的是不是三麻。`nil` = 還不知道（尚未打過）。
@@ -113,6 +113,7 @@ final class ObservedMatchSids {
             $0.sid == sid && $0.clientVersionString == clientVersionString
         }) {
             observations[index].count += 1
+            observations[index].seenAt = Date()  // `latest` 取最近打的那個
             save()
             return
         }
@@ -125,6 +126,11 @@ final class ObservedMatchSids {
         // 只留最近 20 組，避免長時間執行後無限成長
         if observations.count > 20 { observations.removeFirst() }
         save()
+    }
+
+    /// 取消匹配：不會有對局開出來，清掉待回填的 sid
+    func cancelAwaitingGameKind() {
+        awaitingGameKind = nil
     }
 
     /// 對局開始：把類型回填到剛送出的那個 sid。

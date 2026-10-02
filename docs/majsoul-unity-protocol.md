@@ -20,12 +20,12 @@
 | 雀魂客戶端 | Unity WebGL `chs_t-WebGL-release-4.0.45(45)`，不是 Laya |
 | Naki 狀態來源 | WebSocket → Liqi protobuf → Swift 狀態；不是 JS 遊戲物件 |
 | Naki 動作來源 | Swift 組 Liqi request，再由 `window.__nakiWebSocket.sendRaw` 送出 |
-| AI package | MortalSwift `0.5.1`／revision `78b048e…`，由已提交的 `Package.resolved` 釘住 |
+| AI package | MortalSwift `0.5.2`／revision `6223548…`，由已提交的 `Package.resolved` 釘住 |
 | AI 權重 | 仍是既有 bundled Mortal v4 四麻權重；0.5.x 並不是新訓練模型 |
-| 「最新最強」 | **不能這樣宣稱**。0.5.1 是當日最新公開 package tag，但權重未更新，也沒有牌力 benchmark |
+| 「最新最強」 | **不能這樣宣稱**。0.5.x 只改 encoder／parity，權重未更新，也沒有牌力 benchmark |
 | 四麻 | 唯一有正確模型形狀與 parity 證據的模式 |
-| 三麻 | 沒有三麻模型；仍把三麻狀態送進四麻模型。2026-08-02 起自動打牌在三麻 fail-closed，UI 明示「三麻不支援」 |
-| 自摸保護 | resolver 純邏輯已存在且單測通過，但整合仍有漏觸發與錯誤完成兩個漏洞 |
+| 三麻 | 沒有本地三麻模型；三麻走雲端-only（2026-08-05），雲端不可用就無推薦，不會退回四麻模型。自動打牌在三麻 fail-closed，但伺服器授權的和牌照送（2026-09-30）；無 live 三麻對局驗證 |
+| 自摸保護 | resolver 純邏輯與整合的兩個漏洞（漏觸發、錯誤完成）在 source 層已收斂，有單測與注入式 fixture；**live 對局未驗證** |
 | 遊戲內高亮 | 現行 WebGL hook 會執行；尚未證明每次都染到正確牌／按鈕 |
 | MCP | 2026-08-01 live `tools/list` 為 42 個；2026-08-02 移除 6 個高亮失敗樁，靜態計數 38（未 live 複查） |
 
@@ -116,7 +116,7 @@ macOS deployment target 是 26.0，所以 macOS 實際只走新路徑；iOS depl
 - type `3`：RESPONSE
 - envelope field 1：method name
 - envelope field 2：payload
-- Naki 自送 request 使用 `60000+` msgId，避免與遊戲低位遞增 id 衝突
+- Naki 自送 request 使用 `60000–63999` msgId（插件 `64000–65500`），避免與遊戲低位遞增 id 衝突；Swift 端辨識 Naki 自送靠配發器登記，不看號段（遊戲自己的 id 跑久了也會進 60000+）
 
 一般 `.lq.ActionPrototype` 收包會做 Liqi XOR decode；`syncGame`／`enterGame` response 內的 restore actions 已是 payload，不應再 XOR。
 
@@ -205,21 +205,20 @@ Mode 語意（2026-08-02 收斂）：`.off` 同時關掉自動送出與顯示—
 
 ### 真正的版本狀態
 
-Xcode package requirement 是 `upToNextMinorVersion`、minimum `0.5.1`，即允許 `[0.5.1, 0.6.0)`，不是 exact pin。下界不能再低：`NativeBotController` 呼叫的 `bot.inferCurrentState()` 是 0.5.1 才有的 API，解到 0.5.0 會編不過。
+Xcode package requirement 是 `upToNextMinorVersion`、minimum `0.5.2`，即允許 `[0.5.2, 0.6.0)`，不是 exact pin。下界不能低於 0.5.1（現為 0.5.2）：`NativeBotController` 呼叫的 `bot.inferCurrentState()` 是 0.5.1 才有的 API，解到 0.5.0 會編不過。
 
 真正決定 revision 的是已提交的 `Package.resolved`（2026-08-02 起不再被 `.gitignore` 排除）：
 
 ```text
-MortalSwift 0.5.1
-revision 78b048e808c09406fc440d7fe642e8e014c210f0
+MortalSwift 0.5.2
+revision 6223548abb930fbd7ff70ae39436eedd6fee5615
 ```
 
-2026-08-02 直接查[官方 MortalSwift remote](https://github.com/Sunalamye/MortalSwift) tags，最高 tag 是 `v0.5.1`，其 dereferenced
-commit 正是 `78b048e…`。所以 Naki 目前解析到最新公開 package tag；這仍不代表模型權重最新或最強。
+`Package.resolved` 現在解到 `0.5.2`／`6223548…`（2026-08-02 時 remote 最高 tag 還是 `v0.5.1`／`78b048e…`；`Package.resolved` 已解到 0.5.2 代表該 tag 現在可解析，remote 最高 tag **未重查**）。這不代表模型權重最新或最強。
 
-lockfile 進版控後，clean clone 會固定在同一 revision（本地 clone → `-resolvePackageDependencies` → `build` 已機械驗過，checkout 是 `78b048e`）。代價是**改 requirement 或跑 `-resolvePackageDependencies` 之後，要把重寫的 `Package.resolved` 一起 commit**。
+lockfile 進版控後，clean clone 會固定在同一 revision（2026-08-02 以 `78b048e` 機械驗過 clone → `-resolvePackageDependencies` → `build`；0.5.2 未重做這個 clean-clone 驗證）。代價是**改 requirement 或跑 `-resolvePackageDependencies` 之後，要把重寫的 `Package.resolved` 一起 commit**。
 
-上游本機另有 v0.5.2 但 **tag 未 push**（remote 最高 v0.5.1，該 commit 也不在任何 remote branch）。在 push 之前把 minimum 改成 `0.5.2` 會在 resolve 階段就失敗：`no versions of 'mortalswift' match the requirement 0.5.2..<0.6.0`。
+0.5.2 移除 `PlayerState` 的 `isAllLast`／`isWRiichi`／`kansOnBoard`／`dorasOwned`／`dorasSeen`／`atIppatsu`，Naki 全都沒用到。
 
 ### 0.5.x 驗證了什麼
 
@@ -235,15 +234,15 @@ MortalSwift test target 用 libriichi v4 當 oracle。兩套固定 MJAI 劇本�
 ### 為什麼不能叫「最新最強模型」
 
 - MortalSwift 0.5.0 更新的是 encoder、和牌／期望值相關邏輯與 parity，不是重新訓練權重；0.5.1 只多了 `inferCurrentState` 與 parity 測試（`git diff v0.5.0 v0.5.1` 僅動 README、版本常數、`NativeMortalBot.swift`、`ObsParityTests.swift`）。
-- bundled `mortal.mlmodelc` 在 0.3.0、0.4.0、0.5.0、0.5.1 的 blobs 相同。
+- bundled `mortal.mlmodelc` 在 0.3.0、0.4.0、0.5.0、0.5.1 的 blobs 相同（0.5.2 未重比對）。
 - Naki 沒有千局級牌力、順位、和率、放銃率或相對基準 benchmark。
 - 現有 obvious-discard sanity test 不能代表實戰強度。
 
-所以能說的是：「Naki 目前使用已完成這批 encoder parity 修正的 MortalSwift 0.5.1」；不能說「模型已升成最新最強」。
+所以能說的是：「Naki 目前使用已完成這批 encoder parity 修正的 MortalSwift 0.5.2」；不能說「模型已升成最新最強」。
 
 ### 三麻
 
-Naki 雖有 `is3P` 狀態與 UI 警示，`NativeBotController` 最後仍建立同一個 `MortalBot(version: 4, useBundledModel: true)`。目前沒有 sanma constructor、775×34 encoder 或專用權重。三麻推薦在結構上未驗證，不應用於品質判斷。
+`is3P` 時 `NativeBotController` 建的是 `CloudBot(local: nil, …)`，bundled 四麻模型不會建構（2026-08-05）；本地沒有 sanma constructor、775×34 encoder 或專用權重。雲端不可用時那一手無推薦。三麻推薦在結構上未驗證，不應用於品質判斷。
 
 ## Unity 遊戲內高亮
 
@@ -319,17 +318,17 @@ Debug server 只綁 loopback，HTTP 與 MCP 共用 port 8765。2026-08-02 靜態
 
 | 優先級 | 風險 | 驗證狀態 |
 |--------|------|----------|
-| P0 | tsumo snapshot 可能因推薦空而沒進 resolver | source code 已確認；尚缺 live failure fixture |
-| P0 | hora send 失敗仍被 mark handled | source code 已確認；尚缺 live failure fixture |
+| 已處理 | tsumo snapshot 可能因推薦空而沒進 resolver | source 已收斂，注入式 fixture 覆蓋；尚缺 live 對局 |
+| 已處理 | hora send 失敗仍被 mark handled | source 已收斂（成功才 `markHandled`，bounded retry），fixture 覆蓋；尚缺 live failure |
 | 已處理 | Legacy iOS 已接上 resolver（AUDIT §15.2） | source 已確認；未 live 驗證 |
-| P1 | 手動 `game_action(hora)` 無 snapshot 時會猜 tsumo | source code 已確認；應改 fail closed |
+| 已處理 | 手動 `game_action(hora)` 無 snapshot 時會猜 tsumo | 已改 fail-closed（`GameTools.swift:109-114`）；單測覆蓋，live 未驗證 |
 | 已處理 | off mode 的顯示閘門（RecommendationView + GameHighlightScript） | source 與單測已確認；畫面未 live 驗證 |
 | P1 | pass／無效 discard／riichi failure path 會過早 mark handled | source code 已確認；尚缺 failure-path integration tests |
-| P1 | 三麻使用四麻模型 | source code 已確認 |
-| 已處理 | Package.resolved 已納入版本控制、requirement 下界升到 0.5.1 | clean clone → resolve → build 已機械驗過（`78b048e`）|
+| 已處理 | 三麻使用四麻模型 | 已改雲端-only；無 live 三麻驗證 |
+| 已處理 | Package.resolved 已納入版本控制、requirement 下界升到 0.5.2 | 0.5.1 時 clean clone → resolve → build 已機械驗過（`78b048e`）；0.5.2 未重做 |
 | 已處理 | 3 組無效設定已從 UI 移除；隱藏玩家名稱改以協定層重做（AUDIT §15.3） | source 已確認；協定層改寫只有合成 frame 測試，未 live 驗證 |
 | P1 | WebGL highlighter 可能誤染／重複染 | hook 執行已確認；視覺正確性未驗證 |
-| P2 | Liqi generic protobuf tag 只讀一 byte，field > 31 會錯 | source code 已確認 |
+| 已處理 | Liqi generic protobuf tag 只讀一 byte，field > 31 會錯 | `parseProtobufBlocks` 的 tag 是 varint（`LiqiEnvelope.swift:165-176`）；此列為過期紀錄 |
 | P2 | AI 實戰強度未知 | 沒有 benchmark，未驗證 |
 
 ## 驗收邊界

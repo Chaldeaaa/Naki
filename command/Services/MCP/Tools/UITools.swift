@@ -41,7 +41,8 @@ struct ExecuteJSTool: MCPTool {
         """
     static let inputSchema = MCPInputSchema(
         properties: [
-            "code": .string("要執行的 JavaScript 代碼（函數體格式，需要 return 語句才能獲取返回值）")
+            "code": .string("要執行的 JavaScript 代碼（函數體格式，需要 return 語句才能獲取返回值）"),
+            "timeout": .integer("逾時秒數（預設 30，上限 60）；逾時回錯誤，頁面端的 Promise 仍可能在背景執行")
         ],
         required: ["code"]
     )
@@ -57,7 +58,44 @@ struct ExecuteJSTool: MCPTool {
             throw MCPToolError.missingParameter("code")
         }
 
-        let result = try await context.executeJavaScript(code)
-        return ["result": result ?? NSNull()]
+        let seconds = min(max(arguments["timeout"] as? Int ?? Self.defaultTimeout, 1), Self.maxTimeout)
+        let result = try await Self.race(seconds: seconds) { try await context.executeJavaScript(code) }
+        return ["result": JSONSanitizer.sanitize(result ?? NSNull())]
+    }
+
+    static let defaultTimeout = 30
+    static let maxTimeout = 60
+
+    /// 不用 task group：group 會等所有子任務結束，而永不 resolve 的 Promise 正是要逃掉的情況。
+    /// 逾時後 `work` 那個 Task 仍會掛著（`callJavaScript` 不可取消），但呼叫端與連線會結束。
+    private static func race(seconds: Int,
+                             _ work: @escaping () async throws -> Any?) async throws -> Any? {
+        let gate = ResumeOnce()
+        let box: Box = try await withCheckedThrowingContinuation { continuation in
+            let timer = Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                gate.resume(continuation, .failure(MCPToolError.executionFailed("execute_js 逾時（\(seconds) 秒）")))
+            }
+            Task {
+                do { gate.resume(continuation, .success(Box(value: try await work()))) }
+                catch { gate.resume(continuation, .failure(error)) }
+                timer.cancel()
+            }
+        }
+        return box.value
+    }
+
+    private struct Box: @unchecked Sendable { let value: Any? }
+
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func resume(_ continuation: CheckedContinuation<Box, Error>, _ result: Result<Box, Error>) {
+            lock.lock()
+            let first = !done
+            done = true
+            lock.unlock()
+            if first { continuation.resume(with: result) }
+        }
     }
 }

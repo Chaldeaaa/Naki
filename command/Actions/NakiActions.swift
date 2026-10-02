@@ -234,11 +234,15 @@ struct SendActionAction {
     self.send = send
   }
 
+  /// 等回應的上限。`awaitResponseMs` 來自 MCP 參數，不設上限就能讓一次呼叫掛住任意久。
+  nonisolated static let maxAwaitResponseMs = 60_000
+
   /// 真實實作
   init(sender: LiqiActionSender) {
     self.init(send: { [weak sender] spec, awaitMs in
       guard let sender else { return .unavailable("liqi_sender_deallocated") }
-      return await sender.sendAwaitingResponse(spec, awaitResponseMs: awaitMs)
+      return await sender.sendAwaitingResponse(
+        spec, awaitResponseMs: min(awaitMs, Self.maxAwaitResponseMs))
     })
   }
 
@@ -907,6 +911,60 @@ struct SetHidePlayerNamesAction {
   }
 }
 
+// MARK: - SetAppLanguageAction
+
+/// 切換 App 內語言（設定 Picker）。`.appLocale()` 的 `.environment(\.locale)` 讀 `settings.locale`，寫入即重繪。
+@MainActor
+struct SetAppLanguageAction {
+
+  private nonisolated(unsafe) let perform: (AppLanguage) -> Void
+
+  private init(perform: @escaping (AppLanguage) -> Void) {
+    self.perform = perform
+  }
+
+  /// 真實實作
+  init(settings: SettingsStore) {
+    self.init(perform: { [weak settings] language in settings?.appLanguage = language })
+  }
+
+  /// Preview／未接線的預設值；`nonisolated` 的理由見 `ExecuteJavaScriptAction.init()`。
+  nonisolated init() {
+    self.perform = { _ in }
+  }
+
+  func callAsFunction(_ language: AppLanguage) {
+    perform(language)
+  }
+}
+
+// MARK: - SetKeepAliveInBackgroundAction
+
+/// 背景保活開關（設定 Toggle）。持久化與推送 JS 都在 `WebSession.setKeepAliveInBackground`。
+@MainActor
+struct SetKeepAliveInBackgroundAction {
+
+  private nonisolated(unsafe) let perform: (Bool) -> Void
+
+  private init(perform: @escaping (Bool) -> Void) {
+    self.perform = perform
+  }
+
+  /// 真實實作
+  init(session: WebSession) {
+    self.init(perform: { [weak session] enabled in session?.setKeepAliveInBackground(enabled) })
+  }
+
+  /// Preview／未接線的預設值；`nonisolated` 的理由見 `ExecuteJavaScriptAction.init()`。
+  nonisolated init() {
+    self.perform = { _ in }
+  }
+
+  func callAsFunction(_ enabled: Bool) {
+    perform(enabled)
+  }
+}
+
 // MARK: - WebViewAction
 
 /// 交出這條 path 對應的 WebView。
@@ -964,10 +1022,20 @@ struct NakiActions {
   var executeJavaScript: ExecuteJavaScriptAction
   /// 熱插拔：開關插件（免 reload；持久化 + 對當前頁面注入 enable/disable）
   var setPluginEnabled: SetPluginEnabledAction
+  /// L3 總開關：允許插件改寫／送出封包（持久化 + 重建 user script + 即時注入）
+  var setPluginsMayModifyOutbound: SetPluginsMayModifyOutboundAction
   /// 重掃插件目錄（URL 匯入落地後刷新清單）
   var rescanPlugins: RescanPluginsAction
   /// 移除插件（刪目錄 + 熱停用 + 重掃）
   var removePlugin: RemovePluginAction
+  /// 安裝（匯入／更新）插件
+  var installPlugins: InstallPluginsAction
+  /// 檢查插件更新
+  var checkPluginUpdates: CheckPluginUpdatesAction
+  /// 檢查 App 有沒有新版（`manual` 略過節流與略過清單）
+  var checkForUpdate: CheckForUpdateAction
+  /// 改插件設定值
+  var setPluginSetting: SetPluginSettingAction
   /// 強制斷線重連以重建 Bot
   var forceReconnect: ForceReconnectAction
   /// 切換自動打牌模式
@@ -986,6 +1054,10 @@ struct NakiActions {
   var switchServer: SwitchServerAction
   /// 隱藏玩家名稱開關
   var setHidePlayerNames: SetHidePlayerNamesAction
+  /// 背景保活開關
+  var setKeepAliveInBackground: SetKeepAliveInBackgroundAction
+  /// 切換 App 內語言
+  var setAppLanguage: SetAppLanguageAction
   /// 交出這條 path 的 WebView
   var webView: WebViewAction
 
@@ -997,8 +1069,13 @@ struct NakiActions {
   nonisolated init() {
     self.executeJavaScript = ExecuteJavaScriptAction()
     self.setPluginEnabled = SetPluginEnabledAction()
+    self.setPluginsMayModifyOutbound = SetPluginsMayModifyOutboundAction()
     self.rescanPlugins = RescanPluginsAction()
     self.removePlugin = RemovePluginAction()
+    self.installPlugins = InstallPluginsAction()
+    self.checkPluginUpdates = CheckPluginUpdatesAction()
+    self.checkForUpdate = CheckForUpdateAction()
+    self.setPluginSetting = SetPluginSettingAction()
     self.forceReconnect = ForceReconnectAction()
     self.setAutoPlayMode = SetAutoPlayModeAction()
     self.startFullAutoNow = StartFullAutoNowAction()
@@ -1008,14 +1085,21 @@ struct NakiActions {
     self.reloadPage = ReloadPageAction()
     self.switchServer = SwitchServerAction()
     self.setHidePlayerNames = SetHidePlayerNamesAction()
+    self.setKeepAliveInBackground = SetKeepAliveInBackgroundAction()
+    self.setAppLanguage = SetAppLanguageAction()
     self.webView = WebViewAction()
   }
 
-  /// 正式路徑：由 `NakiRuntime` 一次組好（十個全部明講，漏一個編譯期就不過）
+  /// 正式路徑：由 `NakiRuntime` 一次組好（全部明講，漏一個編譯期就不過）
   init(executeJavaScript: ExecuteJavaScriptAction,
        setPluginEnabled: SetPluginEnabledAction,
+       setPluginsMayModifyOutbound: SetPluginsMayModifyOutboundAction,
        rescanPlugins: RescanPluginsAction,
        removePlugin: RemovePluginAction,
+       installPlugins: InstallPluginsAction,
+       checkPluginUpdates: CheckPluginUpdatesAction,
+       checkForUpdate: CheckForUpdateAction,
+       setPluginSetting: SetPluginSettingAction,
        forceReconnect: ForceReconnectAction,
        setAutoPlayMode: SetAutoPlayModeAction,
        startFullAutoNow: StartFullAutoNowAction,
@@ -1025,11 +1109,18 @@ struct NakiActions {
        reloadPage: ReloadPageAction,
        switchServer: SwitchServerAction,
        setHidePlayerNames: SetHidePlayerNamesAction,
+       setKeepAliveInBackground: SetKeepAliveInBackgroundAction,
+       setAppLanguage: SetAppLanguageAction,
        webView: WebViewAction) {
     self.executeJavaScript = executeJavaScript
     self.setPluginEnabled = setPluginEnabled
+    self.setPluginsMayModifyOutbound = setPluginsMayModifyOutbound
     self.rescanPlugins = rescanPlugins
     self.removePlugin = removePlugin
+    self.installPlugins = installPlugins
+    self.checkPluginUpdates = checkPluginUpdates
+    self.checkForUpdate = checkForUpdate
+    self.setPluginSetting = setPluginSetting
     self.forceReconnect = forceReconnect
     self.setAutoPlayMode = setAutoPlayMode
     self.startFullAutoNow = startFullAutoNow
@@ -1039,6 +1130,8 @@ struct NakiActions {
     self.reloadPage = reloadPage
     self.switchServer = switchServer
     self.setHidePlayerNames = setHidePlayerNames
+    self.setKeepAliveInBackground = setKeepAliveInBackground
+    self.setAppLanguage = setAppLanguage
     self.webView = webView
   }
 }
@@ -1081,6 +1174,32 @@ struct SetPluginEnabledAction {
   }
 }
 
+// MARK: - L3 總開關
+
+/// L3 總開關（允許插件送出／改寫封包）。真實實作走 `NakiRuntime.setPluginsMayModifyOutbound`，
+/// 它會重建 user script——直接寫 settings 的話，頁面 reload 後值會退回舊的。
+/// 由關轉開的確認對話由呼叫端（UI）負責。
+struct SetPluginsMayModifyOutboundAction {
+
+  private nonisolated(unsafe) let perform: (Bool) -> Void
+
+  private init(perform: @escaping (Bool) -> Void) {
+    self.perform = perform
+  }
+
+  init(runtime: NakiRuntime) {
+    self.init(perform: { [weak runtime] on in runtime?.setPluginsMayModifyOutbound(on) })
+  }
+
+  nonisolated init() { self.perform = { _ in } }
+
+  #if DEBUG
+    init(stub: @escaping (Bool) -> Void) { self.init(perform: stub) }
+  #endif
+
+  func callAsFunction(_ on: Bool) { perform(on) }
+}
+
 // MARK: - 重掃插件
 
 /// 重掃插件目錄（URL 匯入落地後刷新 `pluginDescriptors`）。
@@ -1104,6 +1223,98 @@ struct RescanPluginsAction {
   #endif
 
   func callAsFunction() { perform() }
+}
+
+// MARK: - 安裝／檢查更新／改設定
+
+/// 逐一落地插件（匯入與確認更新共用），成功的有重掃；回傳失敗原因。
+struct InstallPluginsAction {
+
+  private nonisolated(unsafe) let perform: ([ImportedPlugin]) -> [String]
+
+  private init(perform: @escaping ([ImportedPlugin]) -> [String]) {
+    self.perform = perform
+  }
+
+  init(runtime: NakiRuntime) {
+    self.init(perform: { [weak runtime] plugins in runtime?.installPlugins(plugins) ?? [] })
+  }
+
+  nonisolated init() { self.perform = { _ in [] } }
+
+  #if DEBUG
+    init(stub: @escaping ([ImportedPlugin]) -> [String]) { self.init(perform: stub) }
+  #endif
+
+  func callAsFunction(_ plugins: [ImportedPlugin]) -> [String] { perform(plugins) }
+}
+
+/// 檢查已安裝插件有沒有新版（只檢查，不安裝）。
+struct CheckPluginUpdatesAction {
+
+  private nonisolated(unsafe) let perform: () async -> [PluginUpdate]
+
+  private init(perform: @escaping () async -> [PluginUpdate]) {
+    self.perform = perform
+  }
+
+  init(runtime: NakiRuntime) {
+    self.init(perform: { [weak runtime] in await runtime?.checkPluginUpdates() ?? [] })
+  }
+
+  nonisolated init() { self.perform = { [] } }
+
+  #if DEBUG
+    init(stub: @escaping () async -> [PluginUpdate]) { self.init(perform: stub) }
+  #endif
+
+  func callAsFunction() async -> [PluginUpdate] { await perform() }
+}
+
+/// 檢查 App 本身有沒有新版（只提示，不下載）。
+struct CheckForUpdateAction {
+
+  private nonisolated(unsafe) let perform: (Bool) async -> Void
+
+  private init(perform: @escaping (Bool) async -> Void) {
+    self.perform = perform
+  }
+
+  init(runtime: NakiRuntime) {
+    self.init(perform: { [weak runtime] manual in await runtime?.checkForUpdate(manual: manual) })
+  }
+
+  nonisolated init() { self.perform = { _ in } }
+
+  #if DEBUG
+    init(stub: @escaping (Bool) async -> Void) { self.init(perform: stub) }
+  #endif
+
+  func callAsFunction(manual: Bool) async { await perform(manual) }
+}
+
+/// 存插件設定值；插件已啟用才熱重載（改設定不該順便把插件啟用並執行）。
+struct SetPluginSettingAction {
+
+  private nonisolated(unsafe) let perform: (String, String, Any) -> Void
+
+  private init(perform: @escaping (String, String, Any) -> Void) {
+    self.perform = perform
+  }
+
+  init(runtime: NakiRuntime) {
+    self.init(perform: { [weak runtime] id, key, value in
+      runtime?.setPluginSetting(id: id, key: key, value: value)
+    })
+  }
+
+  nonisolated init() { self.perform = { _, _, _ in } }
+
+  #if DEBUG
+    init(stub: @escaping (String, String, Any) -> Void) { self.init(perform: stub) }
+  #endif
+
+  func callAsFunction(_ id: String, _ key: String, _ value: Any) { perform(id, key, value) }
 }
 
 // MARK: - 移除插件

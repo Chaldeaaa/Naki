@@ -210,29 +210,53 @@ nonisolated final class LiqiMsgIdAllocator: @unchecked Sendable {
     /// 配發區段上界（含）；配發到這個值之後回捲到 `rangeStart`。
     ///
     /// **60000–63999 是 Naki 自送，64000–65500 保留給插件注入**（§7.6）。
-    /// 兩處以 60000 為界的守衛（`naki-websocket.js:400`、`LiqiParser` 的
-    /// `ObservedMatchSids`）一個字都不用改——插件送的仍然 `>= 60000`，仍不會
-    /// 被誤認成遊戲自己送的；同時 Naki 又能分辨「這筆是我送的（<64000）還是插件送的」。
+    /// `LiqiParser` 以 `isIssued` 登記制辨認 Naki 自送的 msgId，插件號段另外判斷；
+    /// 插件送的仍然 `>= 60000`，不會被誤認成遊戲自己送的。
     static let rangeEnd: UInt16 = 63999
     /// 插件注入的 msgId 區段（JS 端 naki-plugins.js 自己配發，不經這個 allocator）
     static let pluginRangeStart: UInt16 = 64000
     static let pluginRangeEnd: UInt16 = 65500
 
+    /// 登記表上限：回應通常在數秒內到，保留最近這麼多筆已足夠
+    private static let issuedLimit = 256
+
     private let lock = NSLock()
     private var current: UInt16
+    /// 已配發、尚未收到回應的 msgId（舊到新）
+    private var issued: [UInt16] = []
 
     /// - Parameter start: 起始值；超出 `rangeStart...rangeEnd` 會被夾回區段內
     init(start: UInt16 = LiqiMsgIdAllocator.rangeStart) {
         current = LiqiMsgIdAllocator.clamp(start)
     }
 
-    /// 取下一個 msgId：回傳當前值並前進；到達 `rangeEnd` 後回捲到 `rangeStart`
+    /// 取下一個 msgId：回傳當前值並前進；到達 `rangeEnd` 後回捲到 `rangeStart`，並登記待回應
     func next() -> UInt16 {
         lock.lock()
         defer { lock.unlock() }
         let value = current
+        issued.removeAll { $0 == value }
+        issued.append(value)
+        if issued.count > Self.issuedLimit { issued.removeFirst() }
         current = (value >= LiqiMsgIdAllocator.rangeEnd) ? LiqiMsgIdAllocator.rangeStart : value &+ 1
         return value
+    }
+
+    /// 認領一筆回應：msgId 是本配發器發出且尚未認領過才回 true（同一筆只認領一次）。
+    /// 遊戲自己的 msgId 跑久了也會進入 60000+，不能只看號段。
+    func claim(_ msgId: UInt16) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let index = issued.firstIndex(of: msgId) else { return false }
+        issued.remove(at: index)
+        return true
+    }
+
+    /// 是否為本配發器發出且尚未認領的 msgId。不消耗登記（與 `claim` 的差別）。
+    func isIssued(_ msgId: UInt16) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return issued.contains(msgId)
     }
 
     /// 目前尚未配發出去的值（測試 / 診斷用，不會前進）

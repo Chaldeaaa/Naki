@@ -90,17 +90,18 @@ git tag -d v<版本>
 
 ## release notes 是寫出來的，不是 `git log` 倒出來的
 
-2.9.0 的第一版 notes 是機械生成的，長這樣：14 條 raw commit 標題倒在最上面
-（第一條 `chore: bump 2.9.0`），下載表格被壓到最底下。點進 release 頁的人要的是
+2.9.0 的第一版 notes 是機械生成的，長這樣：14 條 raw commit 標題直接倒進來
+（第一條 `chore: bump 2.9.0`），沒有摘要、沒有已知限制。點進 release 頁的人要的是
 **「這版對我有什麼差別」**跟**「檔案在哪」**——commit 標題兩者都答不出來，
 它是寫給改程式碼的人看的。
 
 所以腳本現在不生成改動清單了：`--notes-file` 帶一份寫好的 markdown 進來，
 沒帶就只有下載表格與 changelog 連結（寧可少講，也不要用雜訊充版面）。
+notes 用 `release-notes` skill 產生，並以 `python3 .claude/skills/release-notes/scripts/lint-notes.py <file>` 驗過再交給 `--notes-file`。
 
 寫的時候：
 
-- **下載表格擺最前面**，含平台需求與「未簽名要怎麼裝」
+- 照 `release-notes` skill 的模板：下載表在「已知限制」之後、「完整變更」之前；未簽名等安裝提醒寫進「已知限制」
 - 用**使用者看得到的差別**破題，不是用改了哪個檔案。
   例：「iPhone 上的牌桌只佔中間一小塊，左右各 25% 黑邊」→ 為什麼 → 現在如何
 - 修復講**症狀**（「一碰畫面就崩潰」），不講 commit 標題（「移除隱式動畫」）
@@ -108,7 +109,7 @@ git tag -d v<版本>
   這些寫出來比事後收 issue 便宜
 - 完整 changelog 給連結就好，不要展開
 
-v2.9.0 的成品可以當範本：https://github.com/Sunalamye/Naki/releases/tag/v2.9.0
+範本見 `.claude/skills/release-notes/SKILL.md` 的模板。
 
 ## 發布前決策 gate（腳本不做，要先想清楚）
 
